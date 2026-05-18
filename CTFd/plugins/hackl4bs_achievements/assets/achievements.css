@@ -1,0 +1,182 @@
+/* ── Achievement Toast ────────────────────────────────────────────────────── */
+.hl-ach-toast {
+  position: fixed;
+  bottom: 28px;
+  right: 28px;
+  z-index: 99999;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 22px;
+  background: #161b22;
+  border: 1px solid #21262d;
+  border-left: 4px solid #00ff41;
+  border-radius: 12px;
+  max-width: 340px;
+  box-shadow:
+    0 16px 48px rgba(0, 0, 0, 0.7),
+    0 0 0 1px rgba(0, 255, 65, 0.12),
+    0 0 40px rgba(0, 255, 65, 0.08);
+  overflow: hidden;
+  transform: translateX(calc(100% + 40px));
+  opacity: 0;
+  transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.3s ease;
+  pointer-events: none;
+}
+
+.hl-ach-toast--in {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+.hl-ach-toast--out {
+  transform: translateX(calc(100% + 40px));
+  opacity: 0;
+  transition: transform 0.35s ease-in, opacity 0.3s ease-in;
+}
+
+/* Shimmer overlay */
+.hl-ach-toast-shine {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 20%,
+    rgba(0, 255, 65, 0.06) 40%,
+    rgba(0, 255, 65, 0.12) 50%,
+    rgba(0, 255, 65, 0.06) 60%,
+    transparent 80%
+  );
+  animation: hl-ach-shine 2s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes hl-ach-shine {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%); }
+}
+
+.hl-ach-toast-icon {
+  font-size: 40px;
+  line-height: 1;
+  flex-shrink: 0;
+  filter: drop-shadow(0 0 8px rgba(0, 255, 65, 0.4));
+  animation: hl-ach-pop 0.5s cubic-bezier(0.34, 1.8, 0.64, 1) 0.1s both;
+}
+
+@keyframes hl-ach-pop {
+  from { transform: scale(0) rotate(-20deg); }
+  to   { transform: scale(1) rotate(0deg); }
+}
+
+.hl-ach-toast-label {
+  font-family: 'Courier New', monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: #00ff41;
+  margin-bottom: 4px;
+}
+
+.hl-ach-toast-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: #e6edf3;
+  margin-bottom: 3px;
+  line-height: 1.2;
+}
+
+.hl-ach-toast-desc {
+  font-size: 12px;
+  color: #8b949e;
+  line-height: 1.4;
+}
+
+/* ── Profile Achievements ─────────────────────────────────────────────────── */
+.hl-ach-profile {
+  margin: 28px 0;
+  padding: 20px 24px;
+  background: #0d1117;
+  border: 1px solid #21262d;
+  border-radius: 12px;
+}
+
+.hl-ach-profile-title {
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  color: #8b949e;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hl-ach-profile-title::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(to right, #21262d, transparent);
+}
+
+.hl-ach-profile-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.hl-ach-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 18px;
+  background: #161b22;
+  border: 1px solid #21262d;
+  border-radius: 10px;
+  min-width: 90px;
+  cursor: default;
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.2s, box-shadow 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+
+.hl-ach-badge--earned {
+  border-color: rgba(0, 255, 65, 0.22);
+}
+
+.hl-ach-badge--earned:hover {
+  transform: translateY(-3px) scale(1.04);
+  border-color: rgba(0, 255, 65, 0.45);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 0 16px rgba(0, 255, 65, 0.1);
+}
+
+.hl-ach-badge--locked {
+  opacity: 0.3;
+  filter: grayscale(1);
+}
+
+.hl-ach-badge--locked:hover {
+  opacity: 0.45;
+}
+
+.hl-ach-badge-icon {
+  font-size: 30px;
+  line-height: 1;
+}
+
+.hl-ach-badge-name {
+  font-family: 'Courier New', monospace;
+  font-size: 9px;
+  color: #8b949e;
+  text-align: center;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.hl-ach-badge--earned .hl-ach-badge-name {
+  color: #e6edf3;
+}
