@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="hl-login-page">
+
+  <canvas id="hl-matrix-canvas" aria-hidden="true"></canvas>
+
+  <div class="hl-login-terminal">
+
+    <div class="hl-term-bar">
+      <span class="hl-dot r"></span>
+      <span class="hl-dot y"></span>
+      <span class="hl-dot g"></span>
+      <span class="hl-term-title">{{ Configs.ctf_name }} — authentication</span>
+    </div>
+
+    <div class="hl-term-body">
+
+      <div class="hl-boot-seq" id="hl-boot-seq" style="margin-bottom:20px;">
+        <div data-boot-line="Initializing secure session..."></div>
+        <div data-boot-line="Loading challenge framework... done"></div>
+        <div data-boot-line="Awaiting credentials."></div>
+      </div>
+
+      <div class="hl-term-div">── authenticate ──</div>
+
+      {% include "components/errors.html" %}
+
+      {% if integrations.mlc() %}
+        <div style="margin-bottom:16px;">
+          <a class="hl-btn-submit" style="display:block;text-align:center;text-decoration:none;"
+             href="{{ url_for('auth.oauth_login') }}">
+            Login with Major League Cyber
+          </a>
+          <div class="hl-term-div" style="margin-top:12px;">── or ──</div>
+        </div>
+      {% endif %}
+
+      {% with form = Forms.auth.LoginForm() %}
+        <form method="post" accept-charset="utf-8" autocomplete="on">
+
+          <div class="hl-field">
+            <span class="hl-prompt">user $</span>
+            {{ form.name(class="hl-input", value=name,
+               autocomplete="username email",
+               placeholder="username or email") }}
+          </div>
+
+          <div class="hl-field">
+            <span class="hl-prompt">pass $</span>
+            {{ form.password(class="hl-input",
+               autocomplete="current-password",
+               placeholder="password") }}
+          </div>
+
+          {{ form.nonce() }}
+
+          <div class="hl-form-actions">
+            <a class="hl-link" href="{{ url_for('auth.reset_password') }}">
+              forgot password?
+            </a>
+            {{ form.submit(class="hl-btn-submit") }}
+            {% if registration_visible() %}
+              <a class="hl-btn-register" href="{{ url_for('auth.register') }}">Register</a>
+            {% endif %}
+          </div>
+
+        </form>
+      {% endwith %}
+
+      <div style="margin-top:24px;display:flex;align-items:center;gap:8px;">
+        <span style="font-family:monospace;font-size:12px;color:#30363d;">
+          hackl4bs@ctf:~$
+        </span>
+        <span class="hl-cursor"></span>
+      </div>
+
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <title>{{ title or Configs.ctf_name }}</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#141414">
+  <link rel="shortcut icon" href="{{ Configs.ctf_small_icon }}" type="image/x-icon">
+
+  {{ meta | safe }}
+
+  {% block stylesheets %}
+    {# Bootstrap + CTFd core CSS #}
+    <link rel="stylesheet" href="/themes/core/static/assets/main.e9ec7884.css">
+  {% endblock %}
+
+  {# Plugins cargan aquí — hackl4bs.css va DESPUÉS para ganar la cascada #}
+  {{ Plugins.styles }}
+
+  {# HackL4bs theme — carga al final para sobreescribir plugins y Bootstrap #}
+  <link rel="stylesheet" href="/themes/hackl4bs/static/assets/hackl4bs.css">
+
+  {{ Assets.js("assets/js/color_mode_switcher.js", type=None) }}
+
+  <script type="text/javascript">
+    window.init = {
+      'urlRoot':       "{{ request.script_root }}",
+      'csrfNonce':     "{{ Session.nonce }}",
+      'userMode':      "{{ Configs.user_mode }}",
+      'userId':        {{ Session.id }},
+      'userName':      {{ User.name | tojson }},
+      'userEmail':     {{ User.email | tojson }},
+      'userVerified':  {{ User.verified | tojson }},
+      'teamId':        {{ Team.id | tojson }},
+      'teamName':      {{ Team.name | tojson }},
+      'start':         {{ Configs.start | tojson }},
+      'end':           {{ Configs.end | tojson }},
+      'themeSettings': {{ Configs.theme_settings | tojson }},
+      'eventSounds':   [
+        "/themes/core/static/sounds/notification.webm",
+        "/themes/core/static/sounds/notification.mp3",
+      ],
+    }
+    document.documentElement.setAttribute("data-bs-theme", "dark");
+    if (localStorage) localStorage.setItem("data-bs-theme", "dark");
+  </script>
+
+  {{ Configs.theme_header }}
+</head>
+<body>
+
+{% include "components/navbar.html" %}
+
+<main role="main">
+  {% block content %}
+  {% endblock %}
+</main>
+
+{% include "components/snackbar.html" %}
+
+<footer class="footer">
+  <div class="container text-center">
+    <span class="footer-text">
+      {{ Configs.ctf_name }} &nbsp;&bull;&nbsp; HackL4bs CTF Platform
+    </span>
+  </div>
+</footer>
+
+{% include "components/notifications.html" %}
+
+{% block scripts %}
+  {{ Assets.js("assets/js/page.js") }}
+{% endblock %}
+
+<script src="/themes/hackl4bs/static/assets/hackl4bs-theme.js" defer></script>
+
+{{ Plugins.scripts }}
+
+{{ Configs.theme_footer }}
+</body>
+</html>

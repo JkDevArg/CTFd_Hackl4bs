@@ -1,0 +1,8 @@
+{
+  "name": "Whaley Integration",
+  "author": "Custom",
+  "description": "Integra Whaley con CTFd para lanzar instancias Docker por usuario directamente desde el reto.",
+  "version": "1.0.0",
+  "license": "MIT",
+  "script": "/plugins/whaley_ctfd_plugin/assets/whaley.js"
+}

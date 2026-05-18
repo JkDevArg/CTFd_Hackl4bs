@@ -1,0 +1,132 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+env/
+venv*
+.venv*
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+
+# Translations
+# TODO: CTFd 4.0 We should consider generating .mo files in a Docker image instead of saving them in git
+# *.mo
+
+# Django stuff:
+*.log
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+.DS_Store
+
+*.db
+*.log
+*.log.*
+.idea/
+.vscode/
+CTFd/static/uploads
+CTFd/uploads
+.data/
+.ctfd_secret_key
+.*.swp
+
+# Vagrant
+.vagrant
+
+# CTFd Exports
+*.zip
+
+# JS
+node_modules/
+
+# Flask Profiler files
+flask_profiler.sql
+
+# ── HackL4bs / Proyecto específico ───────────────────────────────────────────
+
+# Variables de entorno con secrets (API keys, webhooks, tokens)
+.env
+.env.*
+!.env.example
+
+# Datos en runtime de Docker (DB, uploads, logs, redis)
+.data/
+**/logs/*.log
+
+# SSL certificates generados por Hestia / Let's Encrypt
+ssl/
+*.pem
+*.key
+*.crt
+*.p12
+
+# Whaley: base de datos local y logs de instancias
+whaley/data/
+whaley/logs/
+whaley/*.db
+
+# Challenges binarios / archivos grandes de retos
+# (solo excluye binarios; los Dockerfiles y scripts sí se versionan)
+challenges/**/*.zip
+challenges/**/*.tar.gz
+challenges/**/*.bin
+challenges/**/*.exe
+
+# Docker overrides locales
+docker-compose.override.yml
+docker-compose.local.yml
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Editores
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace

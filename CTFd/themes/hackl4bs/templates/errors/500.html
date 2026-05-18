@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="hl-error-page">
+  <div style="animation: hl-fade-in 0.5s ease;">
+    <div class="hl-error-code" style="color:#f85149;">500</div>
+    <div class="hl-error-msg" style="color:#f85149;">Internal Server Error</div>
+    <div class="hl-error-prompt">
+      <span style="color:#4493f8;">$</span>
+      journalctl -u ctfd --no-pager<br>
+      <span style="color:#f85149;">CRITICAL: Unhandled exception — incident logged</span><br>
+      <span style="color:#656d76;">Contact an administrator if this persists.</span>
+    </div>
+    <div class="hl-error-detail">
+      An unexpected error occurred on the server.<br>
+      The incident has been recorded automatically.
+    </div>
+    <a href="{{ url_for('views.static_html', route='/') }}"
+       class="hl-btn-submit"
+       style="display:inline-block;text-decoration:none;background:#b62324;">
+      Return to home
+    </a>
+  </div>
+</div>
+{% endblock %}

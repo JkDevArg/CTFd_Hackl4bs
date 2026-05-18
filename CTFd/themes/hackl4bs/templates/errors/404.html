@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="hl-error-page">
+  <div style="animation: hl-fade-in 0.5s ease;">
+    <div class="hl-error-code">404</div>
+    <div class="hl-error-msg">Not Found</div>
+    <div class="hl-error-prompt">
+      <span style="color:#4493f8;">$</span>
+      curl -I {{ request.path }}<br>
+      <span style="color:#656d76;">HTTP/1.1 404 Not Found</span><br>
+      <span style="color:#656d76;">X-Resource: does-not-exist</span>
+    </div>
+    <div class="hl-error-detail">
+      The requested resource could not be found.<br>
+      Check the URL and try again.
+    </div>
+    <a href="{{ url_for('views.static_html', route='/') }}"
+       class="hl-btn-submit"
+       style="display:inline-block;text-decoration:none;">
+      Return to home
+    </a>
+  </div>
+</div>
+{% endblock %}

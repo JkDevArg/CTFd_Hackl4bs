@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="hl-login-page">
+
+  <canvas id="hl-matrix-canvas" aria-hidden="true"></canvas>
+
+  <div class="hl-login-terminal" style="max-width:520px;">
+
+    <div class="hl-term-bar">
+      <span class="hl-dot r"></span>
+      <span class="hl-dot y"></span>
+      <span class="hl-dot g"></span>
+      <span class="hl-term-title">{{ Configs.ctf_name }} — new operator</span>
+    </div>
+
+    <div class="hl-term-body">
+
+      <div class="hl-boot-seq" id="hl-boot-seq" style="margin-bottom:20px;">
+        <div data-boot-line="Enrolling new operator..."></div>
+        <div data-boot-line="All fields are required unless noted."></div>
+      </div>
+
+      <div class="hl-term-div">── register ──</div>
+
+      {% include "components/errors.html" %}
+
+      {% with form = Forms.auth.RegistrationForm() %}
+        <form method="post" accept-charset="utf-8">
+
+          <div class="hl-field">
+            <span class="hl-prompt">user $</span>
+            {{ form.name(class="hl-input", placeholder="choose a username") }}
+          </div>
+
+          <div class="hl-field">
+            <span class="hl-prompt">mail $</span>
+            {{ form.email(class="hl-input", placeholder="email address") }}
+          </div>
+
+          <div class="hl-field">
+            <span class="hl-prompt">pass $</span>
+            {{ form.password(class="hl-input", placeholder="create a password") }}
+          </div>
+
+          <div class="hl-field">
+            <span class="hl-prompt">conf $</span>
+            {{ form.confirm(class="hl-input", placeholder="confirm password") }}
+          </div>
+
+          {% if form.affiliation %}
+          <div class="hl-field">
+            <span class="hl-prompt">org  $</span>
+            {{ form.affiliation(class="hl-input", placeholder="affiliation (optional)") }}
+          </div>
+          {% endif %}
+
+          {% if form.website %}
+          <div class="hl-field">
+            <span class="hl-prompt">url  $</span>
+            {{ form.website(class="hl-input", placeholder="website (optional)") }}
+          </div>
+          {% endif %}
+
+          {{ form.nonce() }}
+
+          <div class="hl-form-actions">
+            <a class="hl-link" href="{{ url_for('auth.login') }}">already registered?</a>
+            {{ form.submit(class="hl-btn-submit") }}
+          </div>
+
+        </form>
+      {% endwith %}
+
+      <div style="margin-top:24px;display:flex;align-items:center;gap:8px;">
+        <span style="font-family:monospace;font-size:12px;color:#30363d;">hackl4bs@ctf:~$</span>
+        <span class="hl-cursor"></span>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
