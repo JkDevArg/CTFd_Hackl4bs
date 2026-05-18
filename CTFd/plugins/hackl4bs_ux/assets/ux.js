@@ -611,7 +611,9 @@
     // Features globales
     initCountdown();
     hookSolveCelebration();
-    initTeamActivity();
+    fetch("/api/v1/users/me").then(r => r.ok ? r.json() : null).then(data => {
+      if (data && data.data && data.data.team_id) initTeamActivity();
+    }).catch(() => {});
     pollFirstBloods();
     setInterval(pollFirstBloods, 30000);
 
