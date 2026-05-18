@@ -967,10 +967,21 @@
     document.addEventListener("whaley:instancesChanged", fetchAllInstances);
   }
 
+  async function maybeInitFloatingWidget() {
+    try {
+      const resp = await fetch("/api/v1/users/me");
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const user = data.data;
+      if (!user || !user.team_id) return;
+      initFloatingWidget();
+    } catch (e) {}
+  }
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initFloatingWidget);
+    document.addEventListener("DOMContentLoaded", maybeInitFloatingWidget);
   } else {
-    initFloatingWidget();
+    maybeInitFloatingWidget();
   }
 
 })();
