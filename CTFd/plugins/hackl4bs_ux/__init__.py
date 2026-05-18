@@ -15,7 +15,7 @@ from flask import Blueprint, request, jsonify
 from CTFd.plugins import register_plugin_assets_directory
 from CTFd.utils.decorators import authed_only
 from CTFd.utils.user import get_current_user
-from CTFd.models import db, Solves, Challenges, Users
+from CTFd.models import db, Solves, Challenges, Users, Teams
 from CTFd.utils import get_config
 from sqlalchemy import func, desc
 from sqlalchemy import event as sa_event
@@ -42,6 +42,15 @@ class ChallengeWorking(db.Model):
     username = db.Column(db.String(128))
     challenge_name = db.Column(db.String(256))
     started_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class TeamNote(db.Model):
+    __tablename__ = "hackl4bs_team_notes"
+    id = db.Column(db.Integer, primary_key=True)
+    team_id = db.Column(db.Integer, nullable=False, unique=True)
+    content = db.Column(db.Text, default="")
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_by = db.Column(db.String(128))
 
 
 # Al resolver, borrar automáticamente el "working on" de ese usuario
@@ -324,6 +333,133 @@ def load(app):
             "timeline": [{"date": d, "count": c} for d, c in sorted(timeline.items())],
             "first_blood": first_blood_count,
             "fast_solve": fast_solve_count,
+        })
+
+    # ── Notas compartidas del equipo ──────────────────────────────────────────
+    @ux_bp.route("/api/hackl4bs/team-notes", methods=["GET"])
+    @authed_only
+    def get_team_notes():
+        user = get_current_user()
+        if not user.team_id:
+            return jsonify({"content": "", "updated_at": None, "updated_by": None})
+        note = TeamNote.query.filter_by(team_id=user.team_id).first()
+        return jsonify({
+            "content": note.content if note else "",
+            "updated_at": note.updated_at.isoformat() if note and note.updated_at else None,
+            "updated_by": note.updated_by if note else None,
+        })
+
+    @ux_bp.route("/api/hackl4bs/team-notes", methods=["POST"])
+    @authed_only
+    def save_team_notes():
+        user = get_current_user()
+        if not user.team_id:
+            return jsonify({"success": False}), 403
+        body = request.get_json(silent=True) or {}
+        content = (body.get("content") or "")[:10000]
+        note = TeamNote.query.filter_by(team_id=user.team_id).first()
+        if note:
+            note.content = content
+            note.updated_at = datetime.utcnow()
+            note.updated_by = user.name
+        else:
+            db.session.add(TeamNote(
+                team_id=user.team_id, content=content, updated_by=user.name
+            ))
+        db.session.commit()
+        return jsonify({"success": True})
+
+    # ── Stats del equipo (panel mejorado) ─────────────────────────────────────
+    @ux_bp.route("/api/hackl4bs/team-stats/<int:team_id>")
+    def team_stats(team_id):
+        team = Teams.query.get(team_id)
+        if not team:
+            return jsonify({"error": "not found"}), 404
+
+        members = Users.query.filter_by(team_id=team_id).all()
+        member_ids = [m.id for m in members]
+        all_solves = Solves.query.filter(Solves.user_id.in_(member_ids)).all()
+        solved_ids = {s.challenge_id for s in all_solves}
+
+        total_points = 0
+        by_cat = {}
+        chal_cache = {}
+
+        def _chal(cid):
+            if cid not in chal_cache:
+                chal_cache[cid] = Challenges.query.get(cid)
+            return chal_cache[cid]
+
+        for s in all_solves:
+            c = _chal(s.challenge_id)
+            if c:
+                total_points += c.value or 0
+                cat = c.category or "misc"
+                by_cat[cat] = by_cat.get(cat, 0) + 1
+
+        # First bloods del equipo
+        fb_sub = (
+            db.session.query(
+                Solves.challenge_id,
+                func.min(Solves.date).label("first_date"),
+            )
+            .group_by(Solves.challenge_id)
+            .subquery()
+        )
+        first_blood_count = (
+            db.session.query(func.count())
+            .select_from(Solves)
+            .join(fb_sub, (Solves.challenge_id == fb_sub.c.challenge_id) &
+                           (Solves.date == fb_sub.c.first_date))
+            .filter(Solves.user_id.in_(member_ids))
+            .scalar() or 0
+        )
+
+        # Categorías completadas (todos los retos de esa cat resueltos)
+        all_chals = Challenges.query.filter_by(state="visible").all()
+        cat_map = {}
+        for c in all_chals:
+            cat_map.setdefault(c.category or "misc", []).append(c.id)
+        completed_cats = sum(
+            1 for ids in cat_map.values() if all(i in solved_ids for i in ids)
+        )
+
+        # Stats por miembro
+        member_stats = []
+        for m in members:
+            m_solves = [s for s in all_solves if s.user_id == m.id]
+            m_pts = sum((_chal(s.challenge_id).value or 0)
+                        for s in m_solves if _chal(s.challenge_id))
+            member_stats.append({
+                "user_id": m.id,
+                "username": m.name,
+                "solves": len(m_solves),
+                "points": m_pts,
+            })
+
+        # Últimas soluciones
+        recent = sorted(all_solves, key=lambda s: s.date or datetime.min, reverse=True)[:15]
+        recent_data = []
+        for s in recent:
+            solver = Users.query.get(s.user_id)
+            c = _chal(s.challenge_id)
+            recent_data.append({
+                "username": solver.name if solver else "?",
+                "challenge": c.name if c else "?",
+                "category": c.category if c else "?",
+                "points": c.value if c else 0,
+                "date": s.date.isoformat() if s.date else None,
+            })
+
+        return jsonify({
+            "team_name": team.name,
+            "total_points": total_points,
+            "total_solves": len(all_solves),
+            "first_blood": first_blood_count,
+            "completed_categories": completed_cats,
+            "by_category": by_cat,
+            "members": member_stats,
+            "recent": recent_data,
         })
 
     app.register_blueprint(ux_bp)

@@ -428,6 +428,66 @@
   }
 
   // ── 7. PROFILE STATS ──────────────────────────────────────────────────────
+
+  function buildHeatmap(timeline) {
+    const countMap = {};
+    timeline.forEach(({date, count}) => { countMap[date] = count; });
+
+    const now = new Date();
+    const start = new Date(now);
+    start.setDate(start.getDate() - 364);
+    start.setDate(start.getDate() - start.getDay()); // align to Sunday
+
+    const level = n => n === 0 ? 0 : n === 1 ? 1 : n <= 3 ? 2 : n <= 6 ? 3 : 4;
+    const months = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
+
+    const wrap = document.createElement("div");
+    wrap.className = "ux-heatmap-wrap";
+
+    const monthRow = document.createElement("div");
+    monthRow.className = "ux-heatmap-months";
+
+    const grid = document.createElement("div");
+    grid.className = "ux-heatmap-grid";
+
+    let currentMonth = -1;
+    let colIdx = 0;
+    const cursor = new Date(start);
+
+    while (cursor <= now) {
+      const col = document.createElement("div");
+      col.className = "ux-heatmap-col";
+
+      for (let dow = 0; dow < 7; dow++) {
+        const d = new Date(cursor);
+        d.setDate(d.getDate() + dow);
+        const dateStr = d.toISOString().slice(0, 10);
+        const count = countMap[dateStr] || 0;
+        const cell = document.createElement("div");
+        cell.className = `ux-heatmap-cell ux-heatmap-l${level(count)}`;
+        cell.title = `${dateStr}: ${count} solve${count !== 1 ? "s" : ""}`;
+        if (d > now) cell.classList.add("ux-heatmap-future");
+        col.appendChild(cell);
+      }
+
+      if (cursor.getMonth() !== currentMonth) {
+        currentMonth = cursor.getMonth();
+        const lbl = document.createElement("span");
+        lbl.textContent = months[currentMonth];
+        lbl.style.cssText = `grid-column:${colIdx + 1};font-size:9px;color:var(--ux-muted);`;
+        monthRow.appendChild(lbl);
+      }
+
+      grid.appendChild(col);
+      cursor.setDate(cursor.getDate() + 7);
+      colIdx++;
+    }
+
+    wrap.appendChild(monthRow);
+    wrap.appendChild(grid);
+    return wrap;
+  }
+
   async function initProfileStats() {
     const match = window.location.pathname.match(/\/users\/(\d+)/);
     if (!match) return;
@@ -508,21 +568,11 @@
         body.appendChild(catSection);
       }
 
-      // ── Timeline sparkline ────────────────────────────────────────────────
-      if ((data.timeline || []).length > 1) {
+      // ── Heatmap de actividad ──────────────────────────────────────────────
+      if ((data.timeline || []).length) {
         const timeSection = document.createElement("div");
-        timeSection.innerHTML = `<div class="ux-section-label">actividad</div>`;
-        const barsDiv = document.createElement("div");
-        barsDiv.className = "ux-timeline-bars";
-        const maxCount = Math.max(...data.timeline.map(t => t.count), 1);
-        data.timeline.forEach(point => {
-          const bar = document.createElement("div");
-          bar.className = "ux-timeline-bar";
-          bar.style.height = `${Math.round((point.count / maxCount) * 40)}px`;
-          bar.dataset.tip = `${point.date}: ${point.count}`;
-          barsDiv.appendChild(bar);
-        });
-        timeSection.appendChild(barsDiv);
+        timeSection.innerHTML = `<div class="ux-section-label">actividad (52 semanas)</div>`;
+        timeSection.appendChild(buildHeatmap(data.timeline));
         body.appendChild(timeSection);
       }
 
@@ -574,6 +624,179 @@
     } catch (e) {}
   }
 
+  // ── 8. TEAM PANEL (página /teams/N) ──────────────────────────────────────
+  async function initTeamPanel() {
+    const match = window.location.pathname.match(/\/teams\/(\d+)/);
+    if (!match) return;
+    const teamId = match[1];
+    if (document.getElementById("ux-team-panel")) return;
+
+    try {
+      const data = await apiFetch(`${API}/team-stats/${teamId}`);
+      if (!data.total_solves && !(data.members && data.members.length)) return;
+
+      const panel = document.createElement("div");
+      panel.id = "ux-team-panel";
+
+      const totalMemberPts = data.members.reduce((s, m) => s + m.points, 0) || 1;
+      const memberBars = data.members
+        .sort((a, b) => b.points - a.points)
+        .map(m => {
+          const pct = Math.round((m.points / totalMemberPts) * 100);
+          return `
+            <div class="ux-team-member-row">
+              <a href="/users/${m.user_id}" class="ux-team-member-name">${m.username}</a>
+              <div class="ux-team-member-bar-track">
+                <div class="ux-team-member-bar-fill" data-pct="${pct}"></div>
+              </div>
+              <span class="ux-team-member-pts">${m.points}pts · ${m.solves}✓</span>
+            </div>`;
+        }).join("");
+
+      const catPills = Object.entries(data.by_category || {})
+        .sort((a, b) => b[1] - a[1])
+        .map(([cat, n]) => `<span class="ux-team-cat-pill">${cat} <b>${n}</b></span>`)
+        .join("");
+
+      const recentRows = (data.recent || []).map(s => `
+        <div class="ux-team-solve-row">
+          <span class="ux-team-solve-who">${s.username}</span>
+          <span class="ux-team-solve-chal">${s.challenge}</span>
+          <span class="ux-team-solve-cat">${s.category}</span>
+          <span class="ux-team-solve-pts">+${s.points}</span>
+          <span class="ux-team-solve-time">${timeAgo(s.date)}</span>
+        </div>`).join("");
+
+      panel.innerHTML = `
+        <div class="ux-team-panel-header">
+          <span class="ux-team-panel-title">⚡ Team Dashboard</span>
+        </div>
+        <div class="ux-team-stat-grid">
+          <div class="ux-team-stat"><div class="ux-team-stat-num" data-target="${data.total_points}">0</div><div class="ux-team-stat-lbl">Puntos</div></div>
+          <div class="ux-team-stat"><div class="ux-team-stat-num" data-target="${data.total_solves}">0</div><div class="ux-team-stat-lbl">Solves</div></div>
+          <div class="ux-team-stat"><div class="ux-team-stat-num" data-target="${data.first_blood}">0</div><div class="ux-team-stat-lbl">First Bloods</div></div>
+          <div class="ux-team-stat"><div class="ux-team-stat-num" data-target="${data.completed_categories}">0</div><div class="ux-team-stat-lbl">Cats Completas</div></div>
+        </div>
+        <div class="ux-section-label">contribución por miembro</div>
+        <div class="ux-team-members">${memberBars}</div>
+        ${catPills ? `<div class="ux-section-label">categorías</div><div class="ux-team-cat-pills">${catPills}</div>` : ""}
+        ${recentRows ? `<div class="ux-section-label">últimas soluciones</div><div class="ux-team-solves">${recentRows}</div>` : ""}
+      `;
+
+      const anchor =
+        document.querySelector("#solves-row, #keys-row, table") ||
+        (() => {
+          const tbl = document.querySelector("table");
+          return tbl ? tbl.closest(".row, section, .card") : null;
+        })();
+
+      const wrapper = document.createElement("div");
+      wrapper.className = "row mb-4";
+      const col = document.createElement("div");
+      col.className = "col-md-12";
+      col.appendChild(panel);
+      wrapper.appendChild(col);
+
+      if (anchor && anchor.parentNode) {
+        anchor.parentNode.insertBefore(wrapper, anchor);
+      } else {
+        const container = document.querySelector(".container");
+        if (container) container.appendChild(wrapper);
+      }
+
+      panel.querySelectorAll(".ux-team-stat-num[data-target]").forEach(el => {
+        const target = parseInt(el.dataset.target, 10);
+        const duration = 900;
+        const start = performance.now();
+        function tick(now) {
+          const t = Math.min((now - start) / duration, 1);
+          el.textContent = Math.round((1 - Math.pow(1 - t, 3)) * target);
+          if (t < 1) requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+      });
+
+      setTimeout(() => {
+        panel.querySelectorAll(".ux-team-member-bar-fill[data-pct]").forEach(el => {
+          el.style.width = el.dataset.pct + "%";
+        });
+      }, 120);
+
+    } catch (e) {}
+  }
+
+  // ── 9. TEAM NOTES SCRATCHPAD ──────────────────────────────────────────────
+  function initTeamNotes() {
+    let _saveTimer = null;
+    let _lastContent = null;
+
+    const btn = document.createElement("div");
+    btn.id = "ux-notes-btn";
+    btn.title = "Notas del equipo";
+    btn.textContent = "📝";
+    document.body.appendChild(btn);
+
+    const widget = document.createElement("div");
+    widget.id = "ux-notes-widget";
+    widget.innerHTML = `
+      <div class="ux-notes-header">
+        <span>📝 Notas del equipo</span>
+        <span id="ux-notes-close" style="cursor:pointer;color:var(--ux-muted)">✕</span>
+      </div>
+      <div id="ux-notes-meta"></div>
+      <textarea id="ux-notes-area" placeholder="Notas compartidas del equipo...&#10;&#10;Auto-guardado cuando dejas de escribir."></textarea>
+      <div id="ux-notes-status"></div>`;
+    document.body.appendChild(widget);
+
+    btn.addEventListener("click", () => {
+      widget.classList.toggle("open");
+      if (widget.classList.contains("open")) loadNotes();
+    });
+    document.getElementById("ux-notes-close").addEventListener("click", () =>
+      widget.classList.remove("open")
+    );
+
+    const area   = document.getElementById("ux-notes-area");
+    const meta   = document.getElementById("ux-notes-meta");
+    const status = document.getElementById("ux-notes-status");
+
+    async function loadNotes() {
+      try {
+        const d = await apiFetch(`${API}/team-notes`);
+        if (_lastContent === null || (d.content !== _lastContent && document.activeElement !== area)) {
+          area.value = d.content || "";
+          _lastContent = area.value;
+        }
+        if (d.updated_at && d.updated_by) {
+          meta.textContent = `Última edición: ${d.updated_by} · ${timeAgo(d.updated_at)}`;
+        }
+      } catch (e) {}
+    }
+
+    area.addEventListener("input", () => {
+      status.textContent = "Guardando...";
+      clearTimeout(_saveTimer);
+      _saveTimer = setTimeout(async () => {
+        try {
+          await apiFetch(`${API}/team-notes`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({content: area.value}),
+          });
+          _lastContent = area.value;
+          status.textContent = "✓ Guardado";
+          setTimeout(() => { status.textContent = ""; }, 2000);
+        } catch (e) {
+          status.textContent = "⚠ Error al guardar";
+        }
+      }, 2500);
+    });
+
+    setInterval(() => {
+      if (widget.classList.contains("open")) loadNotes();
+    }, 20000);
+  }
+
   // ── 10. HINT MODAL IMPROVEMENTS ───────────────────────────────────────────
   function enhanceHints() {
     const modal = document.querySelector(".modal.show, #challenge-window.show, #challenge-window[style*=block]");
@@ -612,7 +835,10 @@
     initCountdown();
     hookSolveCelebration();
     fetch("/api/v1/users/me").then(r => r.ok ? r.json() : null).then(data => {
-      if (data && data.data && data.data.team_id) initTeamActivity();
+      if (data && data.data && data.data.team_id) {
+        initTeamActivity();
+        initTeamNotes();
+      }
     }).catch(() => {});
     pollFirstBloods();
     setInterval(pollFirstBloods, 30000);
@@ -634,6 +860,11 @@
     // Profile page
     if (/\/users\/\d+/.test(window.location.pathname)) {
       initProfileStats();
+    }
+
+    // Team page
+    if (/\/teams\/\d+/.test(window.location.pathname)) {
+      initTeamPanel();
     }
 
     // Hooks de modal
