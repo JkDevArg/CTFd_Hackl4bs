@@ -103,6 +103,13 @@ def reset_stats():
     Unlocks.query.delete(synchronize_session=False)
     Tracking.query.delete(synchronize_session=False)
 
+    # Logros del plugin HackL4bs Achievements
+    try:
+        from CTFd.plugins.hackl4bs_achievements import AchievementEarned
+        AchievementEarned.query.delete(synchronize_session=False)
+    except Exception:
+        pass
+
     # Restaurar valor inicial en retos con scoring dinámico
     db.session.query(Challenges).filter(
         Challenges.initial.isnot(None), Challenges.initial > 0
