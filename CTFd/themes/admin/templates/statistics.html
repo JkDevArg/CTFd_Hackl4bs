@@ -1,9 +1,32 @@
 {% extends "admin/base.html" %}
 
 {% block content %}
+    <!-- Modal de confirmación de reset -->
+    <div class="modal fade" id="resetStatsModal" tabindex="-1" role="dialog">
+        <div class="modal-dialog" role="document">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Reiniciar estadísticas</h5>
+                    <button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
+                </div>
+                <div class="modal-body">
+                    <p>Esta acción eliminará <strong>todos los solves, submissions, awards y tracking</strong> del CTF y reiniciará el estado del SIEM (eventos, alertas, scoreboard, amenazas).</p>
+                    <p class="text-danger"><strong>Esta acción no se puede deshacer.</strong></p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancelar</button>
+                    <button type="button" class="btn btn-danger" id="confirmResetStats">Reiniciar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="jumbotron">
         <div class="container">
             <h1>Statistics</h1>
+            <button class="btn btn-danger btn-sm mt-2" data-toggle="modal" data-target="#resetStatsModal">
+                <i class="fas fa-redo-alt mr-1"></i>Reiniciar estadísticas
+            </button>
         </div>
     </div>
     <div class="container-fluid">
@@ -128,4 +151,48 @@
 
 {% block entrypoint %}
     {{ Assets.js("assets/js/pages/statistics.js", theme="admin") }}
+    <script>
+    function showResetAlert(msg, type) {
+        var existing = document.getElementById('reset-stats-alert');
+        if (existing) existing.remove();
+        var div = document.createElement('div');
+        div.id = 'reset-stats-alert';
+        div.className = 'alert alert-' + type + ' alert-dismissible fade show mx-3';
+        div.setAttribute('role', 'alert');
+        div.innerHTML = msg + '<button type="button" class="close" data-dismiss="alert"><span>&times;</span></button>';
+        var main = document.querySelector('main');
+        main.insertBefore(div, main.firstChild);
+        if (type === 'success') setTimeout(function() { location.reload(); }, 1800);
+    }
+
+    document.getElementById('confirmResetStats').addEventListener('click', function () {
+        var btn = this;
+        btn.disabled = true;
+        btn.textContent = 'Reiniciando…';
+        fetch((init.urlRoot || '') + '/admin/reset_stats', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'CSRF-Token': init.csrfNonce },
+        })
+        .then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
+        .then(function(data) {
+            $('#resetStatsModal').modal('hide');
+            var msg = '<strong>Reinicio completo.</strong> Solves, submissions, awards y tracking eliminados.';
+            if (data.siem_reset) msg += ' SIEM reiniciado.';
+            else if (data.siem_error) msg += ' (SIEM no disponible: ' + data.siem_error + ')';
+            showResetAlert(msg, 'success');
+        })
+        .catch(function(err) {
+            $('#resetStatsModal').modal('hide');
+            showResetAlert('<strong>Error:</strong> ' + err.toString(), 'danger');
+        })
+        .finally(function() {
+            btn.disabled = false;
+            btn.textContent = 'Reiniciar';
+        });
+    });
+    </script>
 {% endblock %}

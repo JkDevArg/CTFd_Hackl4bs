@@ -16,6 +16,8 @@ services:
       - ERROR_LOG=-
       - REVERSE_PROXY=true
       - THEME_FALLBACK=true
+      - SIEM_RESET_URL=http://host.docker.internal:9000/api/v1/reset
+      - SIEM_ADMIN_TOKEN=
     volumes:
       - .data/CTFd/logs:/var/log/CTFd
       - .data/CTFd/uploads:/var/uploads
