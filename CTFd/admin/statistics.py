@@ -96,29 +96,33 @@ def statistics():
 def reset_stats():
     from CTFd.cache import cache
 
-    # Solves tiene tabla propia con FK a submissions — borrar primero para evitar FK violation
-    Solves.query.delete(synchronize_session=False)
-    Submissions.query.delete(synchronize_session=False)
-    Awards.query.delete(synchronize_session=False)
-    Unlocks.query.delete(synchronize_session=False)
-    Tracking.query.delete(synchronize_session=False)
+    errors = []
 
-    # Logros del plugin HackL4bs Achievements
-    try:
-        from CTFd.plugins.hackl4bs_achievements import AchievementEarned
-        AchievementEarned.query.delete(synchronize_session=False)
-    except Exception:
-        pass
+    # Usar SQL directo para evitar problemas de sesión con FK constraints en MariaDB
+    tables = [
+        "solves",
+        "submissions",
+        "awards",
+        "unlocks",
+        "tracking",
+        "hackl4bs_achievement_earned",
+    ]
+    db.session.execute(db.text("SET FOREIGN_KEY_CHECKS=0"))
+    for table in tables:
+        try:
+            db.session.execute(db.text(f"DELETE FROM `{table}`"))
+        except Exception as exc:
+            errors.append(f"{table}: {exc}")
+    db.session.execute(db.text("SET FOREIGN_KEY_CHECKS=1"))
 
     # Restaurar valor inicial en retos con scoring dinámico
-    db.session.query(Challenges).filter(
-        Challenges.initial.isnot(None), Challenges.initial > 0
-    ).update({Challenges.value: Challenges.initial}, synchronize_session=False)
+    db.session.execute(db.text(
+        "UPDATE challenges SET value = initial WHERE initial IS NOT NULL AND initial > 0"
+    ))
 
     db.session.commit()
     db.session.close()
 
-    # Limpiar toda la caché (scores memoizados por usuario/equipo)
     cache.clear()
     clear_standings()
 
@@ -135,4 +139,9 @@ def reset_stats():
         except Exception as exc:
             siem_error = str(exc)
 
-    return jsonify({"success": True, "siem_reset": siem_ok, "siem_error": siem_error})
+    return jsonify({
+        "success": not errors,
+        "siem_reset": siem_ok,
+        "siem_error": siem_error,
+        "db_errors": errors,
+    })
