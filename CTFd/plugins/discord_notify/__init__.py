@@ -34,6 +34,8 @@ CFG_FOOTER                 = "discord_footer"
 CFG_SCOREBOARD_ENABLED     = "discord_scoreboard_enabled"
 CFG_SCOREBOARD_WEBHOOK     = "discord_scoreboard_webhook"
 CFG_SCOREBOARD_INTERVAL    = "discord_scoreboard_interval"   # minutos
+CFG_ACHIEVEMENT_WEBHOOK    = "discord_achievement_webhook"
+CFG_ACHIEVEMENT_ENABLED    = "discord_achievement_enabled"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Scheduler de scoreboard (hilo daemon)
@@ -122,6 +124,40 @@ def build_first_blood_embed(user_name: str, team_name: Optional[str],
             "footer": {"text": footer},
         }]
     }
+
+
+def build_achievement_embed(user_name: str, team_name: Optional[str],
+                            icon: str, ach_name: str, description: str) -> dict:
+    ctf_name = _cfg(CFG_CTF_NAME, "CTF")
+    footer   = _cfg(CFG_FOOTER, ctf_name)
+
+    solver = user_name
+    if team_name:
+        solver = f"{user_name} ({team_name})"
+
+    return {
+        "embeds": [{
+            "title": f"{icon}  ¡Logro Desbloqueado!",
+            "description": (
+                f"**{solver}** ha conseguido el logro **{ach_name}**\n"
+                f"_{description}_"
+            ),
+            "color": 0xF39C12,
+            "footer": {"text": footer},
+        }]
+    }
+
+
+def notify_achievement(user_name: str, team_name: Optional[str],
+                       slug: str, icon: str, ach_name: str, description: str) -> None:
+    """Envía notificación de logro a Discord si está habilitado."""
+    if str(_cfg(CFG_ACHIEVEMENT_ENABLED)) != "1":
+        return
+    url = _cfg(CFG_ACHIEVEMENT_WEBHOOK)
+    if not url:
+        return
+    payload = build_achievement_embed(user_name, team_name, icon, ach_name, description)
+    _send_webhook(url, payload)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -360,6 +396,24 @@ ADMIN_TEMPLATE = """
         </div>
       </div>
 
+      <!-- Achievements -->
+      <div class="col-md-12 mb-4">
+        <div class="card">
+          <div class="card-header bg-warning text-dark">🏆 Notificación de Logros (Achievements)</div>
+          <div class="card-body">
+            <div class="form-check mb-3">
+              <input type="checkbox" class="form-check-input" name="achievement_enabled" id="achievement_enabled" value="1" {% if achievement_enabled %}checked{% endif %}>
+              <label class="form-check-label" for="achievement_enabled">Activar notificaciones de logros</label>
+            </div>
+            <div class="form-group">
+              <label>Webhook URL (canal de logros)</label>
+              <input type="url" name="achievement_webhook" class="form-control" placeholder="https://discord.com/api/webhooks/..." value="{{ achievement_webhook }}">
+              <small class="form-text text-muted">Se enviará un mensaje cada vez que un jugador desbloquee un logro de HackL4bs.</small>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- General -->
       <div class="col-md-12 mb-4">
         <div class="card">
@@ -451,6 +505,8 @@ def load(app):
             set_config(CFG_SCOREBOARD_ENABLED,   "1" if request.form.get("scoreboard_enabled") else "0")
             interval = request.form.get("scoreboard_interval", "60").strip()
             set_config(CFG_SCOREBOARD_INTERVAL,  str(max(10, int(interval or 60))))
+            set_config(CFG_ACHIEVEMENT_WEBHOOK,  request.form.get("achievement_webhook", "").strip())
+            set_config(CFG_ACHIEVEMENT_ENABLED,  "1" if request.form.get("achievement_enabled") else "0")
             saved = True
 
         return render_template_string(
@@ -466,6 +522,8 @@ def load(app):
             scoreboard_webhook=_cfg(CFG_SCOREBOARD_WEBHOOK),
             scoreboard_enabled=str(_cfg(CFG_SCOREBOARD_ENABLED)) == "1",
             scoreboard_interval=_cfg(CFG_SCOREBOARD_INTERVAL, "60"),
+            achievement_webhook=_cfg(CFG_ACHIEVEMENT_WEBHOOK),
+            achievement_enabled=str(_cfg(CFG_ACHIEVEMENT_ENABLED)) == "1",
         )
 
     # ── Admin: endpoint de test ───────────────────────────────────────────────
@@ -494,8 +552,9 @@ def load(app):
         }
 
         for label, url_key in [
-            ("Solve Webhook", CFG_SOLVE_WEBHOOK),
-            ("Blood Webhook", CFG_BLOOD_WEBHOOK),
+            ("Solve Webhook",       CFG_SOLVE_WEBHOOK),
+            ("Blood Webhook",       CFG_BLOOD_WEBHOOK),
+            ("Achievement Webhook", CFG_ACHIEVEMENT_WEBHOOK),
         ]:
             url = _cfg(url_key)
             if url:

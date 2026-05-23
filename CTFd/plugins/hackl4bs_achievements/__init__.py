@@ -60,10 +60,29 @@ def _award(user_id, slug):
     try:
         db.session.add(AchievementEarned(user_id=user_id, slug=slug))
         db.session.commit()
-        return True
     except Exception:
         db.session.rollback()
         return False
+    try:
+        from CTFd.plugins.discord_notify import notify_achievement
+        from CTFd.models import Users, Teams
+        user = Users.query.get(user_id)
+        team = None
+        if user and getattr(user, "team_id", None):
+            team = Teams.query.get(user.team_id)
+        defn = SLUG_TO_DEF.get(slug, {})
+        if user and defn:
+            notify_achievement(
+                user_name=user.name,
+                team_name=team.name if team else None,
+                slug=slug,
+                icon=defn.get("icon", "🏆"),
+                ach_name=defn.get("name", slug),
+                description=defn.get("description", ""),
+            )
+    except Exception:
+        pass
+    return True
 
 
 def _evaluate(user_id, chal_id):
