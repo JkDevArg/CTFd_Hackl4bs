@@ -33,7 +33,6 @@ services:
       - default
       - ctf-network
 
-  # TODO: CTFd 4.0 Migrate to named volumes. Users will likely need to manually migrate existing files
   permissions:
     image: alpine:3.23
     user: root
@@ -41,16 +40,6 @@ services:
       - .data/CTFd/logs:/var/log/CTFd
       - .data/CTFd/uploads:/var/uploads
     command: chown -R 1001:1001 /var/uploads /var/log/CTFd
-
-  nginx:
-    image: nginx:stable
-    restart: always
-    volumes:
-      - ./conf/nginx/http.conf:/etc/nginx/nginx.conf
-    ports:
-      - 80:80
-    depends_on:
-      - ctfd
 
   db:
     image: mariadb:10.11
@@ -66,7 +55,6 @@ services:
     networks:
       - default
       - ctf-network
-    # This command is required to set important mariadb defaults
     command:
       [
         mysqld,
