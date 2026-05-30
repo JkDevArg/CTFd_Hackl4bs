@@ -13,13 +13,13 @@ from CTFd.models import Brackets, Teams, UserFieldEntries, UserFields, Users, db
 from CTFd.utils import config, email, get_app_config, get_config
 from CTFd.utils import user as current_user
 from CTFd.utils import validators
-from CTFd.utils.config import can_send_mail, is_teams_mode
+from CTFd.utils.config import can_send_mail
 from CTFd.utils.config.integrations import mlc_registration
 from CTFd.utils.config.visibility import registration_visible
 from CTFd.utils.crypto import verify_password
 from CTFd.utils.decorators import ratelimit
 from CTFd.utils.decorators.visibility import check_registration_visibility
-from CTFd.utils.helpers import error_for, get_errors, markup
+from CTFd.utils.helpers import error_for, get_errors, markup, post_auth_redirect
 from CTFd.utils.logging import log
 from CTFd.utils.modes import TEAMS_MODE
 from CTFd.utils.security.auth import generate_preset_admin, login_user, logout_user
@@ -88,7 +88,7 @@ def confirm(data=None):
             email.successful_registration_notification(user.email)
         db.session.close()
         if current_user.authed():
-            return redirect(url_for("challenges.listing"))
+            return post_auth_redirect(user)
         return redirect(url_for("auth.login"))
 
     # User is trying to start or restart the confirmation flow
@@ -400,11 +400,6 @@ def register():
 
                 login_user(user)
 
-                if request.args.get("next") and validators.is_safe_url(
-                    request.args.get("next")
-                ):
-                    return redirect(request.args.get("next"))
-
                 if config.can_send_mail() and get_config(
                     "verify_emails"
                 ):  # Confirming users is enabled and we can send email.
@@ -431,10 +426,7 @@ def register():
         )
         db.session.close()
 
-        if is_teams_mode():
-            return redirect(url_for("teams.private"))
-
-        return redirect(url_for("challenges.listing"))
+        return post_auth_redirect(user)
     else:
         return render_template("register.html", errors=errors)
 
@@ -488,11 +480,7 @@ def login():
                 log("logins", "[{date}] {ip} - {name} logged in", name=user.name)
 
                 db.session.close()
-                if request.args.get("next") and validators.is_safe_url(
-                    request.args.get("next")
-                ):
-                    return redirect(request.args.get("next"))
-                return redirect(url_for("challenges.listing"))
+                return post_auth_redirect(user)
 
             else:
                 # This user exists but the password is wrong
@@ -662,7 +650,7 @@ def oauth_redirect():
 
             login_user(user)
 
-            return redirect(url_for("challenges.listing"))
+            return post_auth_redirect(user)
         else:
             log("logins", "[{date}] {ip} - OAuth token retrieval failure")
             error_for(endpoint="auth.login", message="OAuth token retrieval failure.")

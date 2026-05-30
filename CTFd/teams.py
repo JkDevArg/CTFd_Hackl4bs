@@ -11,7 +11,7 @@ from CTFd.utils.decorators.visibility import (
     check_account_visibility,
     check_score_visibility,
 )
-from CTFd.utils.helpers import get_errors, get_infos
+from CTFd.utils.helpers import get_errors, get_infos, post_auth_redirect
 from CTFd.utils.humanize.words import pluralize
 from CTFd.utils.user import get_current_user, get_current_user_attrs
 from CTFd.utils.validators import ValidationError
@@ -118,7 +118,7 @@ def invite():
         clear_user_session(user_id=user.id)
         clear_team_session(team_id=team.id)
 
-        return redirect(url_for("challenges.listing"))
+        return post_auth_redirect(user)
 
 
 @teams.route("/teams/join", methods=["GET", "POST"])
@@ -179,7 +179,7 @@ def join():
             clear_user_session(user_id=user.id)
             clear_team_session(team_id=team.id)
 
-            return redirect(url_for("challenges.listing"))
+            return post_auth_redirect(user)
         else:
             errors.append("That information is incorrect")
             return render_template("teams/join_team.html", infos=infos, errors=errors)
@@ -330,7 +330,7 @@ def new():
         clear_user_session(user_id=user.id)
         clear_team_session(team_id=team.id)
 
-        return redirect(url_for("challenges.listing"))
+        return post_auth_redirect(user)
 
 
 @teams.route("/team")

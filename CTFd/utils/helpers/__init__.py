@@ -1,7 +1,10 @@
 import os
 
-from flask import current_app, flash, get_flashed_messages, request
+from flask import current_app, flash, get_flashed_messages, redirect, request, url_for
 from markupsafe import Markup
+
+from CTFd.utils import validators
+from CTFd.utils.config import is_teams_mode
 
 
 def markup(text):
@@ -25,6 +28,18 @@ def get_infos():
 
 def get_errors():
     return get_flashed_messages(category_filter=request.endpoint + ".errors")
+
+
+def post_auth_redirect(user=None):
+    """Redirect users after login or registration based on user mode."""
+    next_url = request.args.get("next")
+    if next_url and validators.is_safe_url(next_url):
+        return redirect(next_url)
+
+    if is_teams_mode():
+        return redirect(url_for("teams.private"))
+
+    return redirect(url_for("challenges.listing"))
 
 
 @current_app.url_defaults
