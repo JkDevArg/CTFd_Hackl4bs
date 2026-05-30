@@ -62,6 +62,10 @@ services:
         --collation-server=utf8mb4_unicode_ci,
         --wait_timeout=28800,
         --log-warnings=0,
+        --log-bin=mysql-bin,
+        --binlog-expire-logs-seconds=604800,
+        --sync-binlog=1,
+        --innodb-flush-log-at-trx-commit=1,
       ]
 
   cache:
