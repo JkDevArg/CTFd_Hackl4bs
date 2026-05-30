@@ -735,6 +735,7 @@
     btn.title = "Notas del equipo";
     btn.textContent = "📝";
     document.body.appendChild(btn);
+    btn.style.display = "none";
 
     const widget = document.createElement("div");
     widget.id = "ux-notes-widget";
@@ -795,6 +796,19 @@
     setInterval(() => {
       if (widget.classList.contains("open")) loadNotes();
     }, 20000);
+
+    async function updateNotesVisibility() {
+      try {
+        const resp = await fetch("/api/whaley/instances");
+        if (!resp.ok) return;
+        const d = await resp.json();
+        const active = (d.instances || []).length > 0;
+        btn.style.display = active ? "" : "none";
+        if (!active) widget.classList.remove("open");
+      } catch (e) {}
+    }
+    updateNotesVisibility();
+    document.addEventListener("whaley:instancesChanged", updateNotesVisibility);
   }
 
   // ── 10. HINT MODAL IMPROVEMENTS ───────────────────────────────────────────

@@ -269,48 +269,17 @@
         {% endif %}
       </h2>
 
-      <div x-data="CaptainMenu">
-        <a class="edit-team text-white" @click="editTeam()">
-          <i
-              class="cursor-pointer fas fa-cogs fa-2x px-2 pt-3"
-              data-bs-toggle="tooltip" data-bs-placement="top"
-              title="Edit Team"
-          ></i>
-        </a>
-        <a class="edit-captain text-white" @click="chooseCaptain()">
-          <i
-              class="cursor-pointer fas fa-user-tag fa-2x px-2 pt-3"
-              data-bs-toggle="tooltip" data-bs-placement="top"
-              title="Choose Captain"
-          ></i>
-        </a>
 
-        <a class="invite-members text-white" @click="inviteMembers()">
-          <i
-              class="cursor-pointer fas fa-ticket-alt fa-2x px-2 pt-3"
-              data-bs-toggle="tooltip" data-bs-placement="top"
-              title="Invite Users"
-          ></i>
-        </a>
-        <a class="disband-team text-white" @click="disbandTeam()">
-          <i
-              class="cursor-pointer fas fa-trash-alt fa-2x px-2 pt-3"
-              data-bs-toggle="tooltip" data-bs-placement="top"
-              title="Disband Team"
-          ></i>
-        </a>
-      </div>
-
-      <div class="pt-3">{% if team.website and (team.website.startswith('http://') or team.website.startswith('https://')) %}
-          <a href="{{ team.website }}" target="_blank" style="color: inherit;" rel="noopener">
-            <i
-                class="fas fa-external-link-alt fa-2x px-2 pt-2"
-                data-toggle="tooltip" data-placement="top"
-                title="{{ team.website }}"
-            ></i>
+      <div class="pt-3">
+        {% if team.website and (team.website.startswith('http://') or team.website.startswith('https://')) %}
+          <a href="{{ team.website }}" target="_blank" rel="noopener"
+             class="d-inline-flex align-items-center gap-2 badge bg-secondary text-white text-decoration-none px-3 py-2"
+             style="font-size:0.85rem;">
+            <i class="fas fa-external-link-alt"></i>
+            <span style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ team.website }}</span>
           </a>
         {% endif %}
-        </div>
+      </div>
       </div>
 
   </div>
@@ -318,7 +287,27 @@
   <div class="container">
     {% include "components/errors.html" %}
 
-    <br>
+    {% if user.id == team.captain_id %}
+    <div class="d-flex flex-wrap gap-2 justify-content-center"
+         style="position:relative; z-index:10; margin-top:-1.5rem; padding-bottom:1rem;">
+      <button type="button" class="btn btn-sm btn-secondary shadow"
+              data-bs-toggle="modal" data-bs-target="#team-edit-modal">
+        <i class="fas fa-cogs me-1"></i> {% trans %}Edit Team{% endtrans %}
+      </button>
+      <button type="button" class="btn btn-sm btn-secondary shadow"
+              data-bs-toggle="modal" data-bs-target="#team-captain-modal">
+        <i class="fas fa-user-tag me-1"></i> {% trans %}Choose Captain{% endtrans %}
+      </button>
+      <button type="button" class="btn btn-sm btn-info shadow" id="hl-invite-btn">
+        <i class="fas fa-ticket-alt me-1"></i> {% trans %}Invite Users{% endtrans %}
+      </button>
+      <button type="button" class="btn btn-sm btn-danger shadow"
+              data-bs-toggle="modal" data-bs-target="#team-disband-modal">
+        <i class="fas fa-trash-alt me-1"></i> {% trans %}Disband Team{% endtrans %}
+      </button>
+    </div>
+    <span id="hl-invite-trigger" data-bs-toggle="modal" data-bs-target="#team-invite-modal" style="display:none"></span>
+    {% endif %}
 
     <div class="row min-vh-25">
       <div class="col-md-12">
@@ -512,4 +501,43 @@
       window.team_captain = {{ (user.id == team.captain_id) | tojson }};
   </script>
   {{ Assets.js("assets/js/teams/private.js") }}
+  {% if user.id == team.captain_id %}
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      var inviteBtn = document.getElementById("hl-invite-btn");
+      var inviteTrigger = document.getElementById("hl-invite-trigger");
+      if (!inviteBtn || !inviteTrigger) return;
+
+      inviteBtn.addEventListener("click", async function () {
+        inviteBtn.disabled = true;
+        try {
+          var csrfNonce = (window.init && window.init.csrfNonce) || "";
+          var res = await fetch("/api/v1/teams/me/members", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "CSRF-Token": csrfNonce
+            }
+          });
+          var data = await res.json();
+          if (data.success) {
+            var urlRoot = (window.init && window.init.urlRoot) || "";
+            var url = window.location.origin + urlRoot + "/teams/invite?code=" + data.data.code;
+            var linkInput = document.querySelector("#team-invite-modal input[name=link]");
+            if (linkInput) linkInput.value = url;
+            if (window.Alpine) window.Alpine.store("inviteToken", url);
+            inviteTrigger.click();
+          } else {
+            var errs = data.errors || {};
+            alert(Object.values(errs).flat().join("\n") || "Error al generar invitación");
+          }
+        } catch (e) {
+          alert("Error al generar invitación");
+        } finally {
+          inviteBtn.disabled = false;
+        }
+      });
+    });
+  </script>
+  {% endif %}
 {% endblock %}

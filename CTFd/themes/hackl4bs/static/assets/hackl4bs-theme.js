@@ -121,16 +121,11 @@
     const main = document.querySelector("main");
     if (main) {
       main.style.opacity = "0";
-      main.style.transform = "translateY(6px)";
-      main.style.transition = "opacity 0.35s ease, transform 0.35s ease";
+      main.style.transition = "opacity 0.35s ease";
       requestAnimationFrame(() => {
         main.style.opacity = "1";
-        main.style.transform = "translateY(0)";
       });
-      // Limpiar transform tras la transición para no crear un stacking context
-      // que rompe los z-index de Bootstrap modals (#challenge-window vs .modal-backdrop)
       main.addEventListener("transitionend", function clear() {
-        main.style.transform = "";
         main.style.transition = "";
         main.removeEventListener("transitionend", clear);
       }, { once: true });
