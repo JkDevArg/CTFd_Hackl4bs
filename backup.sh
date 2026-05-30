@@ -1,15 +1,15 @@
 #!/bin/bash
-# Backup diario de la base de datos CTFd
-# Guarda los últimos 7 días y elimina los más antiguos automáticamente
+# Backup horario de la base de datos CTFd
+# Guarda las últimas 48 horas (48 backups) y elimina los más antiguos
 # Uso: bash backup.sh
-# Crontab: 0 3 * * * /home/jcenturion/web/ctf.hackl4bs.com/public_html/CTFd/backup.sh >> /home/jcenturion/backups/ctfd/backup.log 2>&1
+# Crontab: 0 * * * * /home/jcenturion/web/ctf.hackl4bs.com/public_html/CTFd/backup.sh >> /home/jcenturion/backups/ctfd/backup.log 2>&1
 
 BACKUP_DIR="/home/jcenturion/backups/ctfd"
 DB_CONTAINER="ctfd-db-1"
 DB_USER="ctfd"
 DB_PASS="ctfd"
 DB_NAME="ctfd"
-KEEP_DAYS=7
+KEEP_DAYS=2
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 FILE="$BACKUP_DIR/ctfd_$TIMESTAMP.sql.gz"
 
