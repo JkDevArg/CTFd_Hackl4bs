@@ -9,6 +9,24 @@
     </div>
   </div>
 
+  <!-- Ban Overlay -->
+  <div id="whaley-ban-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(10,12,18,0.97); z-index:9999; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:40px;">
+    <div style="max-width:620px; background:#161b22; border:2px solid #da3633; border-radius:16px; padding:48px 40px; box-shadow:0 0 60px rgba(218,54,51,0.3);">
+      <div style="font-size:64px; margin-bottom:16px;">🚫</div>
+      <h2 style="color:#f85149; font-size:1.8rem; margin-bottom:8px;">Acceso Suspendido</h2>
+      <p id="ban-type-label" style="color:#8b949e; font-size:0.95rem; margin-bottom:24px;"></p>
+      <div style="background:#0d1117; border:1px solid #30363d; border-radius:10px; padding:20px; margin-bottom:20px; text-align:left;">
+        <div style="color:#8b949e; font-size:0.75rem; text-transform:uppercase; letter-spacing:1px; margin-bottom:8px;">Motivo</div>
+        <div id="ban-reason" style="color:#e6edf3; font-size:1rem; line-height:1.6;"></div>
+      </div>
+      <div style="background:#0d1117; border:1px solid #30363d; border-radius:10px; padding:20px; margin-bottom:28px;">
+        <div style="color:#8b949e; font-size:0.75rem; text-transform:uppercase; letter-spacing:1px; margin-bottom:8px;">Tiempo restante</div>
+        <div id="ban-countdown" style="color:#f0883e; font-size:2.4rem; font-weight:bold; font-family:monospace; letter-spacing:3px;"></div>
+      </div>
+      <p style="color:#484f58; font-size:0.85rem; margin:0;">Si crees que esto es un error, contacta a un administrador del CTF.</p>
+    </div>
+  </div>
+
   <style>
     .challenge-button {
       position: relative;
@@ -208,4 +226,40 @@
 
 {% block scripts %}
   {{ Assets.js("assets/js/challenges.js") }}
+  <script>
+  (function () {
+    var remaining = 0, timer = null;
+    function pad(n) { return String(n).padStart(2, '0'); }
+    function fmt(s) {
+      s = Math.max(0, s);
+      return pad(Math.floor(s / 3600)) + ':' + pad(Math.floor((s % 3600) / 60)) + ':' + pad(s % 60);
+    }
+    function tick() {
+      if (remaining <= 0) { clearInterval(timer); location.reload(); return; }
+      remaining--;
+      var el = document.getElementById('ban-countdown');
+      if (el) el.textContent = fmt(remaining);
+    }
+    function showBanOverlay(data) {
+      var overlay = document.getElementById('whaley-ban-overlay');
+      if (!overlay) return;
+      var re = document.getElementById('ban-reason');
+      var ty = document.getElementById('ban-type-label');
+      var cd = document.getElementById('ban-countdown');
+      if (re) re.textContent = data.reason || 'Actividad sospechosa detectada.';
+      if (ty) ty.textContent = data.type === 'team_ban'
+        ? 'Tu equipo ha sido suspendido por el sistema anti-cheat.'
+        : 'Tu cuenta ha sido suspendida por el sistema anti-cheat.';
+      remaining = Math.max(0, Math.floor(data.remaining_seconds || 0));
+      if (cd) cd.textContent = fmt(remaining);
+      overlay.style.display = 'flex';
+      document.body.style.overflow = 'hidden';
+      if (remaining > 0) timer = setInterval(tick, 1000);
+    }
+    fetch('/api/whaley/my-penalty')
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.active) showBanOverlay(d); })
+      .catch(function () {});
+  })();
+  </script>
 {% endblock %}

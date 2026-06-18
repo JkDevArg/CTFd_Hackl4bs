@@ -153,20 +153,29 @@ def load(app):
         return jsonify({"first_bloods": result})
 
     # ── Rating de dificultad ──────────────────────────────────────────────────
+    def _is_solved(user, challenge_id):
+        mode = get_config("user_mode")
+        if mode == "teams" and user.team_id:
+            return Solves.query.filter_by(challenge_id=challenge_id, team_id=user.team_id).first() is not None
+        return Solves.query.filter_by(challenge_id=challenge_id, user_id=user.id).first() is not None
+
     @ux_bp.route("/api/hackl4bs/ratings/<int:challenge_id>")
     def get_ratings(challenge_id):
         user = get_current_user()
         avg = db.session.query(func.avg(ChallengeRating.rating)).filter_by(challenge_id=challenge_id).scalar()
         count = ChallengeRating.query.filter_by(challenge_id=challenge_id).count()
         my_rating = None
+        solved = False
         if user:
             r = ChallengeRating.query.filter_by(challenge_id=challenge_id, user_id=user.id).first()
             if r:
                 my_rating = r.rating
+            solved = _is_solved(user, challenge_id)
         return jsonify({
             "average": round(float(avg), 1) if avg else None,
             "count": count,
             "my_rating": my_rating,
+            "solved": solved,
         })
 
     @ux_bp.route("/api/hackl4bs/rate/<int:challenge_id>", methods=["POST"])
@@ -178,7 +187,7 @@ def load(app):
         if not (1 <= rating <= 5):
             return jsonify({"success": False, "message": "Rating debe ser 1-5"}), 400
 
-        if not Solves.query.filter_by(user_id=user.id, challenge_id=challenge_id).first():
+        if not _is_solved(user, challenge_id):
             return jsonify({"success": False, "message": "Solo puedes valorar retos que hayas resuelto"}), 403
 
         existing = ChallengeRating.query.filter_by(challenge_id=challenge_id, user_id=user.id).first()

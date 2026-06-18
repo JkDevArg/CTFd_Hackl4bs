@@ -274,33 +274,44 @@
     block.innerHTML = `
       <h6>⭐ Dificultad</h6>
       <div class="ux-stars">
-        ${[1,2,3,4,5].map(i => `<span class="ux-star" data-val="${i}">★</span>`).join("")}
+        ${[1,2,3,4,5].map(i => `<span class="ux-star locked" data-val="${i}">★</span>`).join("")}
       </div>
-      <div class="ux-rating-avg"></div>`;
+      <div class="ux-rating-avg"></div>
+      <div class="ux-rating-locked-msg">🔒 Resuelve este reto para valorarlo</div>`;
 
-    const stars = block.querySelectorAll(".ux-star");
-    const avgEl = block.querySelector(".ux-rating-avg");
+    const stars  = block.querySelectorAll(".ux-star");
+    const avgEl  = block.querySelector(".ux-rating-avg");
+    const lockEl = block.querySelector(".ux-rating-locked-msg");
+    let solved = false;
 
     function setStars(val) {
       stars.forEach(s => s.classList.toggle("active", parseInt(s.dataset.val) <= val));
     }
 
+    function unlock() {
+      stars.forEach(s => s.classList.remove("locked"));
+      lockEl.style.display = "none";
+    }
+
     async function loadRating() {
       try {
         const d = await apiFetch(`${API}/ratings/${chalId}`);
+        solved = !!d.solved;
+        if (solved) unlock();
         if (d.my_rating) setStars(d.my_rating);
         if (d.average !== null) {
           avgEl.textContent = `Promedio: ${d.average}★ (${d.count} votos)`;
         } else {
-          avgEl.textContent = "Sin votos aún";
+          avgEl.textContent = d.count ? "" : "Sin votos aún";
         }
       } catch (e) {}
     }
 
     stars.forEach(star => {
-      star.addEventListener("mouseover", () => setStars(parseInt(star.dataset.val)));
-      star.addEventListener("mouseleave", loadRating);
+      star.addEventListener("mouseover", () => { if (solved) setStars(parseInt(star.dataset.val)); });
+      star.addEventListener("mouseleave", () => { if (solved) loadRating(); });
       star.addEventListener("click", async () => {
+        if (!solved) return;
         try {
           const d = await apiFetch(`${API}/rate/${chalId}`, {
             method: "POST",
@@ -320,6 +331,12 @@
     const target = modal.querySelector(".modal-body, .card-body");
     if (target) target.appendChild(block);
     loadRating();
+
+    // Desbloquear si se resuelve el reto sin cerrar el modal
+    const solveObs = new MutationObserver(() => {
+      if (!solved && modal.querySelector(".alert-success")) loadRating();
+    });
+    solveObs.observe(modal, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
   }
 
   // ── 9. WORKING ON THIS ────────────────────────────────────────────────────

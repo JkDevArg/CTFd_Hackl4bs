@@ -85,6 +85,39 @@ def _award(user_id, slug):
     return True
 
 
+def _flag_belongs_to_other_team(user, submission: str) -> bool:
+    """
+    Consulta Whaley para saber si la flag pertenece a un equipo diferente al del usuario.
+    Retorna True si se debe bloquear el otorgamiento de logros.
+    """
+    try:
+        import os, requests
+        from CTFd.plugins.whaley_ctfd_plugin import _check_flag_ownership, get_whaley_url
+        admin_key = os.environ.get("WHALEY_ADMIN_KEY", "")
+        if not admin_key:
+            return False
+        ownership = _check_flag_ownership(submission, admin_key)
+        if not ownership.get("found"):
+            return False
+        owner_user_id = str(ownership.get("owner_user_id", ""))
+        current_user_id = str(user.id)
+        if owner_user_id == current_user_id:
+            return False
+        # Resolver equipo del dueño desde CTFd si Whaley no lo devolvió
+        owner_team_id = str(ownership.get("owner_team_id") or "")
+        if not owner_team_id and owner_user_id:
+            owner_obj = Users.query.get(int(owner_user_id))
+            if owner_obj:
+                owner_team_id = str(owner_obj.team_id or "")
+        current_team_id = str(user.team_id) if user.team_id else ""
+        # Mismo equipo → permitir logros
+        if current_team_id and owner_team_id and current_team_id == owner_team_id:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def _evaluate(user_id, chal_id):
     """Evalúa y otorga logros tras un solve correcto. Se llama desde after_request."""
     now = datetime.utcnow()
@@ -178,8 +211,15 @@ def load(app):
                 return response
             req_json = request.get_json(silent=True) or {}
             chal_id = req_json.get("challenge_id")
-            if chal_id:
-                _evaluate(user.id, int(chal_id))
+            if not chal_id:
+                return response
+
+            # Segunda línea de defensa: verificar que la flag no pertenece a otro equipo
+            submission = (req_json.get("submission") or "").strip()
+            if submission and _flag_belongs_to_other_team(user, submission):
+                return response
+
+            _evaluate(user.id, int(chal_id))
         except Exception:
             pass
         return response

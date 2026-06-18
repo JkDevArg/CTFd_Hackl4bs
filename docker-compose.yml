@@ -7,6 +7,7 @@ services:
     environment:
       - WHALEY_URL=http://ctf-instancer:8001
       - WHALEY_ADMIN_KEY=7f49dfb8f63f475e69a0a2ae7b6b9d7a
+      - WHALEY_FLAG_PREFIX=H4L
       - UPLOAD_FOLDER=/var/uploads
       - DATABASE_URL=mysql+pymysql://ctfd:ctfd@db/ctfd
       - REDIS_URL=redis://cache:6379
@@ -16,8 +17,9 @@ services:
       - ERROR_LOG=-
       - REVERSE_PROXY=true
       - THEME_FALLBACK=true
-      - SIEM_RESET_URL=http://host.docker.internal:9000/api/v1/reset
+      - SIEM_RESET_URL=http://host.docker.internal:9500/api/v1/reset
       - SIEM_ADMIN_TOKEN=
+      - DISCORD_WEBHOOK_URL=
     volumes:
       - .data/CTFd/logs:/var/log/CTFd
       - .data/CTFd/uploads:/var/uploads

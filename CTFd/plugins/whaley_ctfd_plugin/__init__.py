@@ -1,203 +1,343 @@
-import requests
 import os
-from flask import Blueprint, request, jsonify, session, render_template_string
+import re
+import threading
+from datetime import datetime, timedelta
+
+import requests
+from flask import Blueprint, jsonify, request, render_template_string, session
+from sqlalchemy import event
+from sqlalchemy.exc import StatementError
+from sqlalchemy.sql import text
+
+from CTFd.models import Awards, Challenges, Solves, Teams, Users, db
 from CTFd.plugins import register_plugin_assets_directory
-from CTFd.utils.decorators import authed_only, admins_only
 from CTFd.utils import get_config, set_config
+from CTFd.utils.decorators import admins_only, authed_only
 from CTFd.utils.user import get_current_user
 
-# URL de Whaley (configurable via variable de entorno o config de CTFd)
-WHALEY_URL = os.environ.get("WHALEY_URL", "http://localhost:8001")
+# ── Config ─────────────────────────────────────────────────────────────────────
+WHALEY_URL       = os.environ.get("WHALEY_URL",       "http://localhost:8001")
 WHALEY_ADMIN_KEY = os.environ.get("WHALEY_ADMIN_KEY", "")
+WHALEY_FLAG_PREFIX = os.environ.get("WHALEY_FLAG_PREFIX", "H4L")
+DISCORD_WEBHOOK  = os.environ.get("DISCORD_WEBHOOK_URL", "")
+SIEM_COLLECTOR_URL = os.environ.get("SIEM_COLLECTOR_URL", "http://host.docker.internal:9501")
+SIEM_API_KEY       = os.environ.get("SIEM_API_KEY", "")
+BAN_HOURS        = 4
+
+
+def get_ban_hours() -> int:
+    """Devuelve la duración del ban en horas (configurable desde el admin panel)."""
+    stored = get_config("ban_hours")
+    try:
+        return max(1, int(stored)) if stored else BAN_HOURS
+    except (ValueError, TypeError):
+        return BAN_HOURS
+
+
+def _emit_siem_event(
+    event_type: str,
+    severity: str = "high",
+    team: str = None,
+    team_id: int = None,
+    player: str = None,
+    player_id: int = None,
+    challenge: str = None,
+    challenge_id: int = None,
+    message: str = None,
+    metadata: dict = None,
+):
+    """Envía un evento al collector del SIEM en background (no bloquea la request)."""
+    def _send():
+        try:
+            payload = {
+                "event_type":   event_type,
+                "severity":     severity,
+                "team":         team,
+                "team_id":      team_id,
+                "player":       player,
+                "player_id":    player_id,
+                "challenge":    challenge,
+                "challenge_id": challenge_id,
+                "message":      message,
+                "metadata":     metadata or {},
+            }
+            payload = {k: v for k, v in payload.items() if v is not None}
+            headers = {"Content-Type": "application/json"}
+            if SIEM_API_KEY:
+                headers["X-Api-Key"] = SIEM_API_KEY
+            requests.post(
+                SIEM_COLLECTOR_URL + "/api/v1/event",
+                json=payload,
+                headers=headers,
+                timeout=5,
+            )
+        except Exception as e:
+            print(f"[Whaley→SIEM] Error emitiendo evento '{event_type}': {e}")
+    threading.Thread(target=_send, daemon=True).start()
+
 
 def get_whaley_url():
-    """Obtiene la URL de Whaley desde config de CTFd o variable de entorno."""
     url = get_config("whaley_url")
-    return url if url else WHALEY_URL
+    return url.rstrip("/") if url else WHALEY_URL.rstrip("/")
 
-def get_user_token():
-    """Obtiene el token de acceso del usuario actual desde la sesión/DB."""
-    from CTFd.models import Tokens
-    user = get_current_user()
-    if not user:
-        return None
-    token = Tokens.query.filter_by(user_id=user.id).first()
-    if token:
-        return token.value
-    return None
 
-# ── Template del snippet HTML que inyectamos en el <head> de cada página ──────
+# ── Inject snippet ──────────────────────────────────────────────────────────────
 INJECT_SCRIPT = """
 <script>
-  // Configuración de Whaley inyectada por el plugin
   window.__WHALEY_API__ = "/api/whaley";
 </script>
 <script defer src="/plugins/whaley_ctfd_plugin/assets/whaley.js"></script>
 """
 
 ADMIN_PAGE = """
-<!DOCTYPE html>
-<html>
-<head>
-  <title>Whaley Plugin Config</title>
-  <link rel="stylesheet" href="/themes/core/static/css/main.min.css">
-  <style>
-    body { padding: 40px; max-width: 600px; margin: auto; }
-    .card { padding: 24px; border-radius: 8px; border: 1px solid #dee2e6; margin-top: 20px; }
-    .status { padding: 10px; border-radius: 6px; margin-top: 16px; font-family: monospace; font-size: 13px; }
-    .status.ok { background: #d4edda; color: #155724; }
-    .status.err { background: #f8d7da; color: #721c24; }
-  </style>
-</head>
-<body>
-  <h2>🐳 Whaley Plugin</h2>
-  <div class="card">
-    <h5>Configuración</h5>
-    <form method="POST">
-      <div style="margin-bottom:16px">
-        <label><strong>URL de Whaley</strong></label><br>
-        <input type="text" name="whaley_url" value="{{ current_url }}"
-               style="width:100%;padding:8px;margin-top:6px;border:1px solid #ccc;border-radius:4px">
-        <small style="color:#666">Ej: http://host.docker.internal:8001 o http://whaley:8001</small>
-      </div>
-      <button type="submit" class="btn btn-primary">Guardar</button>
-    </form>
-    {% if saved %}
-    <div class="status ok">✓ Configuración guardada correctamente.</div>
-    {% endif %}
-    {% if conn_status %}
-    <div class="status {{ 'ok' if conn_ok else 'err' }}">
-      {{ conn_status }}
-    </div>
-    {% endif %}
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="jumbotron">
+  <div class="container">
+    <h1>Whaley <span style="color:var(--primary)">Anti-Cheat</span></h1>
+    <p class="lead">Plugin de integración con instancias dinámicas y detección de trampas.</p>
   </div>
-  <div class="card" style="margin-top:16px">
-    <h5>Test de conexión</h5>
-    <form method="GET">
-      <input type="hidden" name="test" value="1">
-      <button type="submit" class="btn btn-secondary">Probar conexión con Whaley</button>
-    </form>
-  </div>
-</body>
-</html>
-"""
-from CTFd.models import db, Solves
-from sqlalchemy import event
-from sqlalchemy.sql import text
-from datetime import datetime, timedelta
+</div>
+<div class="container">
 
-# ── Modelos de base de datos ──────────────────────────────────────────────────
+  <div class="row">
+    <!-- Config -->
+    <div class="col-md-6">
+      <div class="card mb-4">
+        <div class="card-header"><strong>Configuración</strong></div>
+        <div class="card-body">
+          <form method="POST">
+            <div class="mb-3">
+              <label class="form-label"><strong>URL de Whaley</strong></label>
+              <input type="text" name="whaley_url" value="{{ current_url }}"
+                     class="form-control" placeholder="http://host.docker.internal:8001">
+              <small class="text-muted">Dirección interna del servicio de instancias.</small>
+            </div>
+            <div class="mb-3">
+              <label class="form-label"><strong>Duración del ban (horas)</strong></label>
+              <input type="number" name="ban_hours" value="{{ ban_hours }}"
+                     class="form-control" min="1" max="168" style="max-width:120px">
+              <small class="text-muted">Tiempo de suspensión automática al detectar trampa. Actual: <strong>{{ ban_hours }}h</strong></small>
+            </div>
+            <button type="submit" class="btn btn-primary">Guardar</button>
+            <a href="?test=1" class="btn btn-outline-secondary ms-2">Probar conexión</a>
+          </form>
+          {% if saved %}
+          <div class="alert alert-success mt-3 mb-0">Configuración guardada correctamente.</div>
+          {% endif %}
+          {% if conn_status %}
+          <div class="alert {{ 'alert-success' if conn_ok else 'alert-danger' }} mt-3 mb-0">{{ conn_status }}</div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <!-- Desbanear -->
+    <div class="col-md-6">
+      <div class="card mb-4">
+        <div class="card-header">
+          <strong>Equipos Baneados</strong>
+          <span class="badge badge-danger ms-2">{{ active_bans|length }} activos</span>
+        </div>
+        <div class="card-body">
+          {% if active_bans %}
+          <div class="mb-3">
+            <label class="form-label"><strong>Seleccionar equipo para desbanear</strong></label>
+            <select id="ban-select" class="form-control mb-2">
+              {% for ban in active_bans %}
+              <option value="{{ ban.id }}">{{ ban.team_name }} — {{ ban.remaining_str }} restante</option>
+              {% endfor %}
+            </select>
+            <button id="unban-btn" class="btn btn-danger">Desbanear equipo</button>
+            <div id="unban-msg" class="mt-2" style="display:none"></div>
+          </div>
+          <script>
+          document.getElementById('unban-btn').onclick = function() {
+            var sel = document.getElementById('ban-select');
+            var id = sel.value;
+            if (!id) return;
+            var name = sel.options[sel.selectedIndex].text.split(' — ')[0];
+            if (!confirm('¿Desbanear al equipo "' + name + '"?')) return;
+            var btn = this;
+            btn.disabled = true;
+            var msg = document.getElementById('unban-msg');
+            msg.style.display = 'none';
+            fetch('/api/whaley/admin/red-flags/' + id + '/lift', {
+              method: 'POST',
+              credentials: 'same-origin',
+              headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'CSRF-Token': (window.init && window.init.csrfNonce) ? window.init.csrfNonce : ''
+              }
+            })
+            .then(function(r) {
+              if (r.redirected) throw new Error('Sesión expirada — recarga e intenta de nuevo');
+              return r.json();
+            })
+            .then(function(d) {
+              msg.style.display = '';
+              if (d.success) {
+                msg.innerHTML = '<div class="alert alert-success mb-0">' + d.message + '</div>';
+                setTimeout(function() { location.reload(); }, 1200);
+              } else {
+                msg.innerHTML = '<div class="alert alert-danger mb-0">' + (d.message || 'Error desconocido') + '</div>';
+                btn.disabled = false;
+              }
+            })
+            .catch(function(e) {
+              msg.style.display = '';
+              msg.innerHTML = '<div class="alert alert-danger mb-0">Error: ' + e.message + '</div>';
+              btn.disabled = false;
+            });
+          };
+          </script>
+          {% else %}
+          <p class="text-muted mb-0">No hay equipos baneados actualmente.</p>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tabla de bans activos -->
+  {% if active_bans %}
+  <div class="card mb-4">
+    <div class="card-header"><strong>Detalle de bans activos</strong></div>
+    <div class="table-responsive">
+      <table class="table table-sm mb-0">
+        <thead>
+          <tr>
+            <th>Equipo</th>
+            <th>Motivo</th>
+            <th>Tiempo restante</th>
+            <th>Expira (UTC)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for ban in active_bans %}
+          <tr>
+            <td><strong>{{ ban.team_name }}</strong></td>
+            <td><small class="text-muted">{{ ban.reason }}</small></td>
+            <td><span class="badge badge-warning">{{ ban.remaining_str }}</span></td>
+            <td><small class="text-muted">{{ ban.expires_at }}</small></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}
+"""
+
+
+# ── Models ──────────────────────────────────────────────────────────────────────
 
 class WhaleyInstanceLog(db.Model):
     __tablename__ = "whaley_instance_log"
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'))
-    challenge_id = db.Column(db.Integer, db.ForeignKey('challenges.id', ondelete='CASCADE'))
-    start_time = db.Column(db.DateTime, default=datetime.utcnow)
-    solve_time = db.Column(db.DateTime, nullable=True)
+    id               = db.Column(db.Integer, primary_key=True)
+    user_id          = db.Column(db.Integer, db.ForeignKey("users.id",  ondelete="CASCADE"))
+    challenge_id     = db.Column(db.Integer, db.ForeignKey("challenges.id", ondelete="CASCADE"))
+    start_time       = db.Column(db.DateTime, default=datetime.utcnow)
+    solve_time       = db.Column(db.DateTime, nullable=True)
     duration_seconds = db.Column(db.Float, nullable=True)
 
 
 class WhaleyPenalty(db.Model):
-    """Penalizaciones activas por uso de flags ajenas."""
+    """Penalización individual (nivel usuario) — sigue activa como capa secundaria."""
     __tablename__ = "whaley_penalty"
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
-    penalty_type = db.Column(db.String(32), nullable=False)   # 'block' | 'ban'
-    reason = db.Column(db.String(255))
+    id            = db.Column(db.Integer, primary_key=True)
+    user_id       = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    penalty_type  = db.Column(db.String(32), nullable=False)   # 'block' | 'ban'
+    reason        = db.Column(db.String(255))
     offending_flag = db.Column(db.String(512))
-    challenge_id = db.Column(db.Integer, nullable=True)
+    challenge_id  = db.Column(db.Integer, nullable=True)
     offender_team_id = db.Column(db.Integer, nullable=True)
-    owner_user_id = db.Column(db.String(64), nullable=True)   # quien generó la flag
+    owner_user_id = db.Column(db.String(64), nullable=True)
     owner_team_id = db.Column(db.String(64), nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    expires_at = db.Column(db.DateTime, nullable=False)
+    created_at    = db.Column(db.DateTime, default=datetime.utcnow)
+    expires_at    = db.Column(db.DateTime, nullable=False)
 
     def is_active(self):
         return datetime.utcnow() < self.expires_at
 
     def remaining_seconds(self):
-        delta = (self.expires_at - datetime.utcnow()).total_seconds()
-        return max(0, int(delta))
+        return max(0, int((self.expires_at - datetime.utcnow()).total_seconds()))
 
     def remaining_str(self):
         secs = self.remaining_seconds()
         h, rem = divmod(secs, 3600)
-        m, s = divmod(rem, 60)
-        if h:
-            return f"{h}h {m}m {s}s"
-        if m:
-            return f"{m}m {s}s"
+        m, s   = divmod(rem, 60)
+        if h:  return f"{h}h {m}m {s}s"
+        if m:  return f"{m}m {s}s"
         return f"{s}s"
 
 
-# ── Helpers Discord ───────────────────────────────────────────────────────────
+class TeamRedFlag(db.Model):
+    """Ban a nivel de equipo. Todos los miembros quedan bloqueados durante el período."""
+    __tablename__ = "teams_red_flag"
+    id              = db.Column(db.Integer, primary_key=True)
+    team_id         = db.Column(db.Integer, db.ForeignKey("teams.id", ondelete="CASCADE"),
+                                nullable=False, index=True)
+    reason          = db.Column(db.String(255), nullable=False)
+    # El otro equipo involucrado (si aplica)
+    related_team_id = db.Column(db.Integer, nullable=True)
+    challenge_id    = db.Column(db.Integer, nullable=True)
+    offending_flag  = db.Column(db.String(128), nullable=True)   # flag truncada
+    banned_at       = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    expires_at      = db.Column(db.DateTime, nullable=False)
+    lifted_at       = db.Column(db.DateTime, nullable=True)
+    lifted_by       = db.Column(db.Integer,  nullable=True)      # admin user_id
 
-def _discord_color(penalty_type: str) -> int:
-    return 0xFF0000 if penalty_type == "ban" else 0xFFA500
+    def is_active(self):
+        if self.lifted_at:
+            return False
+        return datetime.utcnow() < self.expires_at
+
+    def remaining_seconds(self):
+        if not self.is_active():
+            return 0
+        return max(0, int((self.expires_at - datetime.utcnow()).total_seconds()))
+
+    def remaining_str(self):
+        secs = self.remaining_seconds()
+        h, rem = divmod(secs, 3600)
+        m, s   = divmod(rem, 60)
+        if h:  return f"{h}h {m}m"
+        if m:  return f"{m}m {s}s"
+        return f"{s}s"
 
 
-def _send_discord_penalty(
-    webhook_url: str,
-    username: str,
-    team_name: str,
-    challenge_name: str,
-    owner_username: str,
-    owner_team_name: str,
-    penalty_type: str,
-    remaining_str: str,
-):
-    """
-    Envía un embed a Discord notificando la penalización.
-    Recibe solo datos primitivos para que sea seguro ejecutar en un thread separado
-    sin depender de la sesión SQLAlchemy del request original.
-    """
-    if not webhook_url:
-        return
+# ── Whaley service helpers ──────────────────────────────────────────────────────
 
-    if penalty_type == "ban":
-        title = "🚨 Ban por uso de flag de otro equipo"
-        description = (
-            f"**{username}** (equipo: **{team_name or 'sin equipo'}**) intentó usar "
-            f"la flag de **{owner_username}** (equipo: **{owner_team_name or '?'}**) "
-            f"en el reto **{challenge_name}**.\n\n"
-            f"**Sanción:** Ban de **{remaining_str}**."
-        )
-    else:
-        title = "⚠️ Penalización por compartir flag de equipo"
-        description = (
-            f"**{username}** (equipo: **{team_name or 'sin equipo'}**) usó la flag de su "
-            f"compañero **{owner_username}** en el reto **{challenge_name}**.\n\n"
-            f"**Sanción:** Bloqueado por **{remaining_str}**. No se otorgaron puntos."
-        )
-
-    payload = {
-        "embeds": [{
-            "title": title,
-            "description": description,
-            "color": _discord_color(penalty_type),
-            "timestamp": datetime.utcnow().isoformat(),
-            "footer": {"text": "Whaley Anti-Cheat"},
-        }]
+def _whaley_service_headers():
+    """Headers para llamadas service-to-service a los endpoints admin de Whaley."""
+    return {
+        "X-Admin-Key": WHALEY_ADMIN_KEY,
+        "Content-Type": "application/json",
     }
-    try:
-        requests.post(webhook_url, json=payload, timeout=5)
-    except Exception as e:
-        print(f"[Whaley] Discord webhook error: {e}")
 
 
-# ── Check flag ownership en Whaley ────────────────────────────────────────────
+def _whaley_user_headers(token: str):
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
 
-def _check_flag_ownership(flag_string: str, admin_token: str) -> dict:
+
+def _check_flag_ownership(flag_string: str) -> dict:
     """
-    Consulta el endpoint /admin/api/check-flag de Whaley.
-    Retorna el dict de respuesta o {} en caso de error.
+    Consulta /admin/api/check-flag de Whaley.
+    Devuelve el dict de respuesta o {} en caso de error.
     """
     try:
         resp = requests.post(
             get_whaley_url() + "/admin/api/check-flag",
             json={"flag": flag_string},
-            headers={"Authorization": f"Bearer {admin_token}"},
+            headers=_whaley_service_headers(),
             timeout=5,
         )
         if resp.status_code == 200:
@@ -207,55 +347,418 @@ def _check_flag_ownership(flag_string: str, admin_token: str) -> dict:
     return {}
 
 
-@event.listens_for(Solves, 'after_insert')
-def record_whaley_solve_time(mapper, connection, target):
+# ── Discord helpers ─────────────────────────────────────────────────────────────
+
+def _discord_color(reason_type: str) -> int:
+    return {
+        "steal":  0xFF0000,
+        "leak":   0xFF8800,
+        "noinstance": 0xFFCC00,
+    }.get(reason_type, 0xFF0000)
+
+
+def _send_discord(payload: dict):
+    if not DISCORD_WEBHOOK:
+        return
     try:
-        query = text("SELECT id, start_time FROM whaley_instance_log WHERE user_id = :u AND challenge_id = :c AND solve_time IS NULL ORDER BY start_time DESC LIMIT 1")
+        requests.post(DISCORD_WEBHOOK, json=payload, timeout=5)
+    except Exception as e:
+        print(f"[Whaley] Discord error: {e}")
+
+
+def _discord_team_ban_notification(
+    cheater_team: str, owner_team: str,
+    challenge_name: str, ban_hours: int,
+):
+    payload = {
+        "embeds": [{
+            "title": "🚨 FLAG ROBADA — Ambos equipos baneados",
+            "color": 0xFF0000,
+            "fields": [
+                {"name": "Equipo tramposo",      "value": cheater_team, "inline": True},
+                {"name": "Equipo víctima/cómplice", "value": owner_team, "inline": True},
+                {"name": "Reto",                 "value": challenge_name, "inline": True},
+                {"name": "Sanción",              "value": f"Ban de **{ban_hours}h** + logros revocados", "inline": False},
+            ],
+            "footer": {"text": "Whaley Anti-Cheat"},
+        }]
+    }
+    threading.Thread(target=_send_discord, args=(payload,), daemon=True).start()
+
+
+def _discord_no_instance_ban(team_name: str, challenge_name: str, ban_hours: int):
+    payload = {
+        "embeds": [{
+            "title": "⚠️ Intento de flag sin instancia",
+            "color": 0xFFCC00,
+            "fields": [
+                {"name": "Equipo",   "value": team_name,      "inline": True},
+                {"name": "Reto",     "value": challenge_name, "inline": True},
+                {"name": "Sanción",  "value": f"Ban de **{ban_hours}h**", "inline": True},
+            ],
+            "footer": {"text": "Whaley Anti-Cheat"},
+        }]
+    }
+    threading.Thread(target=_send_discord, args=(payload,), daemon=True).start()
+
+
+# ── Anti-cheat operations ───────────────────────────────────────────────────────
+
+def _get_team_member_ids(team_id: int) -> list:
+    """Devuelve lista de user_id de todos los miembros del equipo."""
+    try:
+        members = Users.query.filter_by(team_id=team_id).all()
+        return [m.id for m in members]
+    except Exception:
+        return []
+
+
+def _revoke_achievements_for_team(team_id: int) -> int:
+    """Elimina todos los logros de los miembros del equipo. Devuelve cuántos usuarios afectó."""
+    try:
+        from CTFd.plugins.hackl4bs_achievements import AchievementEarned  # type: ignore
+        member_ids = _get_team_member_ids(team_id)
+        if not member_ids:
+            return 0
+        AchievementEarned.query.filter(
+            AchievementEarned.user_id.in_(member_ids)
+        ).delete(synchronize_session=False)
+        db.session.commit()
+        return len(member_ids)
+    except Exception as e:
+        db.session.rollback()
+        print(f"[Whaley] Error revocando logros del equipo {team_id}: {e}")
+        return 0
+
+
+def _delete_team_challenge_solve(team_id: int, challenge_id: int):
+    """
+    Elimina el Solve del equipo para un reto específico.
+    También borra el Award de first-blood si lo tenían.
+    """
+    try:
+        # Eliminar solve(s) del equipo para este reto
+        deleted = Solves.query.filter_by(
+            team_id=team_id, challenge_id=challenge_id
+        ).delete(synchronize_session=False)
+
+        # Eliminar award de first blood si existe
+        Awards.query.filter_by(
+            team_id=team_id,
+            category="first_blood",
+        ).filter(
+            Awards.description.contains(f"#{challenge_id}")
+        ).delete(synchronize_session=False)
+
+        db.session.commit()
+        if deleted:
+            print(f"[Whaley] Solve del equipo {team_id} en reto {challenge_id} eliminado.")
+    except Exception as e:
+        db.session.rollback()
+        print(f"[Whaley] Error eliminando solve del equipo {team_id}: {e}")
+
+
+def _nullify_first_blood_records(team_id: int, challenge_id: int):
+    """Borra los registros de first-blood en WhaleyInstanceLog del equipo para el reto."""
+    try:
+        member_ids = _get_team_member_ids(team_id)
+        if not member_ids:
+            return
+        WhaleyInstanceLog.query.filter(
+            WhaleyInstanceLog.user_id.in_(member_ids),
+            WhaleyInstanceLog.challenge_id == challenge_id,
+            WhaleyInstanceLog.solve_time.isnot(None),
+        ).update(
+            {WhaleyInstanceLog.solve_time: None, WhaleyInstanceLog.duration_seconds: None},
+            synchronize_session=False,
+        )
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        print(f"[Whaley] Error limpiando first-blood del equipo {team_id}: {e}")
+
+
+def _nullify_all_fast_resolves(team_id: int):
+    """Limpia todos los fast_resolve del equipo (duration_seconds → NULL en todos los retos)."""
+    try:
+        member_ids = _get_team_member_ids(team_id)
+        if not member_ids:
+            return
+        WhaleyInstanceLog.query.filter(
+            WhaleyInstanceLog.user_id.in_(member_ids),
+            WhaleyInstanceLog.duration_seconds.isnot(None),
+        ).update(
+            {WhaleyInstanceLog.duration_seconds: None},
+            synchronize_session=False,
+        )
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        print(f"[Whaley] Error limpiando fast_resolves del equipo {team_id}: {e}")
+
+
+def _kill_team_instances(team_id: int) -> int:
+    """Detiene todas las instancias Whaley activas de los miembros del equipo."""
+    try:
+        member_ids = {str(uid) for uid in _get_team_member_ids(team_id)}
+        if not member_ids:
+            return 0
+        resp = requests.get(
+            get_whaley_url() + "/admin/api/instances",
+            headers=_whaley_service_headers(),
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return 0
+        instances = resp.json().get("instances", [])
+        killed = 0
+        for inst in instances:
+            if str(inst.get("user_id", "")) in member_ids:
+                iid = inst.get("instance_id") or inst.get("id")
+                if iid:
+                    try:
+                        requests.delete(
+                            get_whaley_url() + f"/admin/api/instances/{iid}",
+                            headers=_whaley_service_headers(),
+                            timeout=10,
+                        )
+                        killed += 1
+                    except Exception:
+                        pass
+        return killed
+    except Exception as e:
+        print(f"[Whaley] Error al detener instancias del equipo {team_id}: {e}")
+        return 0
+
+
+def _is_team_banned(team_id: int) -> "TeamRedFlag | None":
+    """Devuelve el TeamRedFlag activo del equipo, o None si no hay ban vigente."""
+    now = datetime.utcnow()
+    return (
+        TeamRedFlag.query
+        .filter(
+            TeamRedFlag.team_id == team_id,
+            TeamRedFlag.expires_at > now,
+            TeamRedFlag.lifted_at.is_(None),
+        )
+        .order_by(TeamRedFlag.expires_at.desc())
+        .first()
+    )
+
+
+def _ban_team(
+    team_id: int,
+    reason: str,
+    challenge_id: int = None,
+    related_team_id: int = None,
+    offending_flag: str = None,
+    hours: int = BAN_HOURS,
+) -> "TeamRedFlag":
+    """
+    Crea un registro de ban de equipo en teams_red_flag.
+    Si ya tiene un ban activo, no crea duplicado.
+    """
+    now = datetime.utcnow()
+    existing = _is_team_banned(team_id)
+    if existing:
+        return existing
+
+    record = TeamRedFlag(
+        team_id         = team_id,
+        reason          = reason,
+        challenge_id    = challenge_id,
+        related_team_id = related_team_id,
+        offending_flag  = (offending_flag[:80] + "...") if offending_flag and len(offending_flag) > 80 else offending_flag,
+        banned_at       = now,
+        expires_at      = now + timedelta(hours=hours),
+    )
+    db.session.add(record)
+    db.session.commit()
+    print(f"[Whaley] Equipo {team_id} baneado {hours}h — {reason}")
+    return record
+
+
+def _apply_full_cheat_penalty(
+    cheater_team_id: int,
+    owner_team_id: int,
+    challenge_id: int,
+    challenge_name: str,
+    flag_truncated: str,
+):
+    """
+    Aplica la penalización completa cuando se detecta flag robada:
+    - Ban 4h a ambos equipos
+    - Revoca logros de ambos equipos
+    - Elimina el solve robado del equipo tramposo
+    - Limpia registros de first-blood del equipo tramposo
+    """
+    cheater_team = Teams.query.get(cheater_team_id)
+    owner_team   = Teams.query.get(owner_team_id)
+    cheater_name = cheater_team.name if cheater_team else f"equipo#{cheater_team_id}"
+    owner_name   = owner_team.name   if owner_team   else f"equipo#{owner_team_id}"
+
+    # Ban a ambos equipos
+    _ban_team(
+        team_id         = cheater_team_id,
+        reason          = f"Usó flag robada del reto '{challenge_name}' perteneciente al equipo '{owner_name}'",
+        challenge_id    = challenge_id,
+        related_team_id = owner_team_id,
+        offending_flag  = flag_truncated,
+        hours           = get_ban_hours(),
+    )
+    _ban_team(
+        team_id         = owner_team_id,
+        reason          = f"Flag del reto '{challenge_name}' fue compartida/robada por el equipo '{cheater_name}'",
+        challenge_id    = challenge_id,
+        related_team_id = cheater_team_id,
+        offending_flag  = flag_truncated,
+        hours           = get_ban_hours(),
+    )
+
+    # Revocar logros de ambos equipos
+    _revoke_achievements_for_team(cheater_team_id)
+    _revoke_achievements_for_team(owner_team_id)
+
+    # Eliminar solve robado y first-blood del equipo tramposo
+    _delete_team_challenge_solve(cheater_team_id, challenge_id)
+    _nullify_first_blood_records(cheater_team_id, challenge_id)
+
+    # Limpiar fast_resolve badges de ambos equipos
+    _nullify_all_fast_resolves(cheater_team_id)
+    _nullify_all_fast_resolves(owner_team_id)
+
+    # Detener instancias activas de ambos equipos
+    _kill_team_instances(cheater_team_id)
+    _kill_team_instances(owner_team_id)
+
+    # SIEM — ban por flag robada (ambos equipos)
+    _emit_siem_event(
+        event_type="team_ban",
+        severity="critical",
+        team=cheater_name,
+        team_id=cheater_team_id,
+        challenge=challenge_name,
+        challenge_id=challenge_id,
+        message=f"🚨 Equipo '{cheater_name}' baneado {get_ban_hours()}h por usar flag robada de '{challenge_name}' (equipo víctima: {owner_name})",
+        metadata={"ban_hours": get_ban_hours(), "related_team": owner_name, "related_team_id": owner_team_id, "flag_truncated": flag_truncated, "reason": "flag_theft"},
+    )
+    _emit_siem_event(
+        event_type="team_ban",
+        severity="high",
+        team=owner_name,
+        team_id=owner_team_id,
+        challenge=challenge_name,
+        challenge_id=challenge_id,
+        message=f"⚠️ Equipo '{owner_name}' baneado {get_ban_hours()}h — su flag de '{challenge_name}' fue comprometida por '{cheater_name}'",
+        metadata={"ban_hours": get_ban_hours(), "related_team": cheater_name, "related_team_id": cheater_team_id, "flag_truncated": flag_truncated, "reason": "flag_leaked"},
+    )
+
+    # Discord
+    _discord_team_ban_notification(cheater_name, owner_name, challenge_name, get_ban_hours())
+
+    print(f"[Whaley] Penalización completa aplicada: tramposo={cheater_name}, víctima={owner_name}, reto={challenge_name}")
+
+
+# ── SQLAlchemy event listeners ──────────────────────────────────────────────────
+
+@event.listens_for(Solves, "after_insert")
+def record_whaley_solve_time(mapper, connection, target):
+    """Registra la hora de solve en WhaleyInstanceLog cuando CTFd acepta una flag."""
+    try:
+        query = text(
+            "SELECT id, start_time FROM whaley_instance_log "
+            "WHERE user_id = :u AND challenge_id = :c AND solve_time IS NULL "
+            "ORDER BY start_time DESC LIMIT 1"
+        )
         result = connection.execute(query, {"u": target.user_id, "c": target.challenge_id}).fetchone()
         if result:
             log_id, start_time = result
             solve_date = target.date or datetime.utcnow()
-            
-            # Convierte strings a datetime si la DB (como SQLite) retorna strings
             if isinstance(start_time, str):
                 try:
                     start_time = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S.%f")
                 except ValueError:
                     start_time = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
-
             if isinstance(solve_date, str):
                 try:
                     solve_date = datetime.strptime(solve_date, "%Y-%m-%d %H:%M:%S.%f")
                 except ValueError:
                     solve_date = datetime.strptime(solve_date, "%Y-%m-%d %H:%M:%S")
-
             if solve_date and start_time:
                 diff = (solve_date - start_time).total_seconds()
-                update_q = text("UPDATE whaley_instance_log SET solve_time = :st, duration_seconds = :d WHERE id = :id")
-                connection.execute(update_q, {"st": solve_date, "d": diff, "id": log_id})
+                connection.execute(
+                    text("UPDATE whaley_instance_log SET solve_time = :st, duration_seconds = :d WHERE id = :id"),
+                    {"st": solve_date, "d": diff, "id": log_id},
+                )
     except Exception as e:
-        print("Error en record_whaley_solve_time:", e)
+        print(f"[Whaley] Error en record_whaley_solve_time: {e}")
+
+
+# ── ID cache (CTFd ID → Whaley local ID) ───────────────────────────────────────
+_whaley_id_cache: dict = {}
+_WHALEY_CACHE_TTL = 60
+
+
+def _resolve_whaley_id(ctfd_challenge_id, token: str):
+    import time
+    key = str(ctfd_challenge_id)
+    cached = _whaley_id_cache.get(key)
+    if cached:
+        local_id, ts = cached
+        if time.time() - ts < _WHALEY_CACHE_TTL:
+            return local_id
+    whaley_base = get_whaley_url()
+    try:
+        resp = requests.get(
+            f"{whaley_base}/admin/api/flags",
+            headers=_whaley_service_headers(),
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            mapping = data.get("challenge_mapping", {})
+            now = time.time()
+            for local_id, mapped_ctfd_id in mapping.items():
+                _whaley_id_cache[str(mapped_ctfd_id)] = (local_id, now)
+            if key in _whaley_id_cache:
+                return _whaley_id_cache[key][0]
+    except Exception:
+        pass
+    return key
+
+
+def _get_user_token():
+    from CTFd.models import Tokens
+    user = get_current_user()
+    if not user:
+        return None
+    token = Tokens.query.filter_by(user_id=user.id).first()
+    return token.value if token else None
+
+
+# ── Flask plugin loader ─────────────────────────────────────────────────────────
 
 def load(app):
     with app.app_context():
         db.create_all()
 
     plugin_bp = Blueprint("whaley", __name__, template_folder="templates")
-
     register_plugin_assets_directory(app, base_path="/plugins/whaley_ctfd_plugin/assets/")
 
-    # ─── Guard de submissions: penaliza uso de flags ajenas en tiempo real ────
+    # ── Guard principal de submissions ────────────────────────────────────────
     @app.before_request
     def whaley_submission_guard():
         """
-        Intercepta intentos de submit en /api/v1/challenges/attempt.
-        Reglas:
-          - Flag propia            → deja pasar (CTFd valida normalmente)
-          - Flag de compañero      → bloquea 10 min, no suma puntos, log Discord
-          - Flag de otro equipo    → ban 2 horas, log Discord
-        Solo actúa cuando DYNAMIC_FLAGS_ENABLED está activo en Whaley.
+        Intercepta POST /api/v1/challenges/attempt antes de que CTFd procese la flag.
+
+        Lógica:
+          1. Si el equipo del usuario está en teams_red_flag activo → bloquear.
+          2. Si la flag empieza con el prefijo Whaley (H4L{) → consultar a Whaley quién la
+             posee. Si el dueño es otro equipo → ban de 4h a AMBOS equipos + revocar logros
+             + eliminar solve robado.
+          3. Si el reto tiene instancias Whaley y el equipo NO tiene ninguna → ban 4h al
+             equipo tramposo.
         """
-        from flask import g
         if request.path != "/api/v1/challenges/attempt" or request.method != "POST":
             return
 
@@ -263,7 +766,21 @@ def load(app):
         if not user or user.type == "admin":
             return
 
-        # 1. Bloquear si hay una penalización vigente
+        # ── 1. Verificar ban de equipo ────────────────────────────────────────
+        if user.team_id:
+            active_ban = _is_team_banned(user.team_id)
+            if active_ban:
+                team = Teams.query.get(user.team_id)
+                team_name = team.name if team else f"equipo#{user.team_id}"
+                return jsonify({"success": False, "data": {
+                    "status": "incorrect",
+                    "message": (
+                        f"🚨 Tu equipo '{team_name}' está baneado por {active_ban.remaining_str()}. "
+                        f"Motivo: {active_ban.reason}"
+                    ),
+                }}), 200
+
+        # Verificar también ban individual (WhaleyPenalty)
         now = datetime.utcnow()
         active_penalty = (
             WhaleyPenalty.query
@@ -272,134 +789,149 @@ def load(app):
             .first()
         )
         if active_penalty:
-            rem = active_penalty.remaining_str()
-            if active_penalty.penalty_type == "ban":
-                msg = f"Estás baneado por compartir flags. Tiempo restante: {rem}."
-            else:
-                msg = f"Estás bloqueado por usar la flag de un compañero. Tiempo restante: {rem}."
-            return jsonify({"success": False, "data": {"status": "incorrect", "message": msg}}), 200
+            return jsonify({"success": False, "data": {
+                "status": "incorrect",
+                "message": f"🚨 Estás baneado por {active_penalty.remaining_str()}.",
+            }}), 200
 
-        # 2. Leer el flag del body (sin consumir el stream)
-        body = request.get_json(silent=True, force=True)
-        if not body:
-            return
-        submission = (body.get("submission") or "").strip()
+        # ── 2. Leer cuerpo del request ────────────────────────────────────────
+        body         = request.get_json(silent=True, force=True) or {}
         challenge_id = body.get("challenge_id")
-        if not submission or not challenge_id:
+        submission   = (body.get("submission") or "").strip()
+
+        if not challenge_id or not submission:
             return
 
-        # 3. Consultar Whaley para saber de quién es la flag
-        admin_key = WHALEY_ADMIN_KEY
-        if not admin_key:
-            return  # Sin clave admin no podemos verificar, dejamos pasar
+        # ── 3. Detección por flag dinámica Whaley ────────────────────────────
+        # Detecta cualquier flag con formato PREFIX{hex} — no depende del prefijo
+        # exacto para cubrir flags generadas con prefijos anteriores (HL4{, H4L{, etc.)
+        _DYNAMIC_FLAG_RE = re.compile(r'^[A-Za-z0-9_]+\{[0-9a-fA-F]{16,64}\}$')
+        if WHALEY_ADMIN_KEY and _DYNAMIC_FLAG_RE.match(submission):
+            ownership = _check_flag_ownership(submission)
+            if ownership.get("found"):
+                owner_team_id_str = ownership.get("owner_team_id")
+                owner_team_id = int(owner_team_id_str) if owner_team_id_str else None
 
-        ownership = _check_flag_ownership(submission, admin_key)
-        if not ownership.get("found"):
-            return  # No es una flag dinámica de Whaley → CTFd la maneja normalmente
+                submitter_team_id = user.team_id
 
-        owner_user_id = str(ownership.get("owner_user_id", ""))
-        owner_team_id = str(ownership.get("owner_team_id") or "")
-        owner_username = ownership.get("owner_username", "desconocido")
-        owner_team_name = ownership.get("owner_team_name", "")
+                is_stolen = False
+                if owner_team_id and submitter_team_id:
+                    is_stolen = (owner_team_id != submitter_team_id)
+                elif owner_team_id and not submitter_team_id:
+                    # Usuario sin equipo intenta usar flag de equipo
+                    is_stolen = True
 
-        current_user_id = str(user.id)
-        current_team_id = str(user.team_id) if user.team_id else ""
+                if is_stolen:
+                    chal = Challenges.query.get(int(challenge_id))
+                    chal_name = chal.name if chal else f"reto#{challenge_id}"
 
-        # Flag propia → deja pasar
-        if owner_user_id == current_user_id:
-            return
+                    _apply_full_cheat_penalty(
+                        cheater_team_id = submitter_team_id,
+                        owner_team_id   = owner_team_id,
+                        challenge_id    = int(challenge_id),
+                        challenge_name  = chal_name,
+                        flag_truncated  = submission[:20] + "...",
+                    )
 
-        # Recopilar datos primitivos para el thread de Discord (antes de cualquier commit)
-        import threading
-        from CTFd.models import Challenges, Teams as CTFdTeams
-        webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "")
-        _user_name = user.name
-        _user_team_name = ""
+                    return jsonify({"success": False, "data": {
+                        "status": "incorrect",
+                        "message": (
+                            "🚨 Flag perteneciente a otro equipo. "
+                            f"Tu equipo y el equipo propietario han sido baneados por {get_ban_hours()}h. "
+                            "Todos los logros han sido revocados."
+                        ),
+                    }}), 200
+
+        # ── 4. Detección por ausencia de instancia Whaley ─────────────────────
+        any_instance = WhaleyInstanceLog.query.filter_by(challenge_id=challenge_id).first()
+        if not any_instance:
+            return  # No es un reto Whaley, CTFd valida normalmente
+
+        # ¿El equipo del usuario tiene instancia para este reto?
         if user.team_id:
-            try:
-                t = CTFdTeams.query.get(user.team_id)
-                if t:
-                    _user_team_name = t.name
-            except Exception:
-                pass
-        _chal_name = str(challenge_id)
-        try:
-            chal = Challenges.query.get(int(challenge_id))
-            if chal:
-                _chal_name = f"{chal.name} (#{challenge_id})"
-        except Exception:
-            pass
-
-        # Flag de compañero de equipo → penalización 10 minutos
-        if current_team_id and owner_team_id == current_team_id:
-            expires = now + timedelta(minutes=10)
-            penalty = WhaleyPenalty(
-                user_id=user.id,
-                penalty_type="block",
-                reason="Usó flag de su compañero de equipo",
-                offending_flag=submission,
-                challenge_id=challenge_id,
-                offender_team_id=user.team_id,
-                owner_user_id=owner_user_id,
-                owner_team_id=owner_team_id,
-                expires_at=expires,
+            team_instance = (
+                db.session.query(WhaleyInstanceLog)
+                .join(Users, WhaleyInstanceLog.user_id == Users.id)
+                .filter(
+                    Users.team_id == user.team_id,
+                    WhaleyInstanceLog.challenge_id == challenge_id,
+                )
+                .first()
             )
-            db.session.add(penalty)
-            db.session.commit()
-            threading.Thread(
-                target=_send_discord_penalty,
-                args=(webhook_url, _user_name, _user_team_name, _chal_name,
-                      owner_username, owner_team_name, "block", penalty.remaining_str()),
-                daemon=True,
-            ).start()
-            return jsonify({
-                "success": False,
-                "data": {
-                    "status": "incorrect",
-                    "message": (
-                        "⚠️ Esa flag fue generada para tu compañero de equipo. "
-                        "No se otorgan puntos. Bloqueado por 10 minutos."
-                    ),
-                },
-            }), 200
+            has_instance = team_instance is not None
+        else:
+            has_instance = WhaleyInstanceLog.query.filter_by(
+                user_id=user.id, challenge_id=challenge_id
+            ).first() is not None
 
-        # Flag de otro equipo → ban 2 horas
-        if owner_team_id and owner_team_id != current_team_id:
-            expires = now + timedelta(hours=2)
-            penalty = WhaleyPenalty(
-                user_id=user.id,
-                penalty_type="ban",
-                reason="Usó flag de otro equipo",
-                offending_flag=submission,
-                challenge_id=challenge_id,
-                offender_team_id=user.team_id,
-                owner_user_id=owner_user_id,
-                owner_team_id=owner_team_id,
-                expires_at=expires,
-            )
-            db.session.add(penalty)
-            db.session.commit()
-            threading.Thread(
-                target=_send_discord_penalty,
-                args=(webhook_url, _user_name, _user_team_name, _chal_name,
-                      owner_username, owner_team_name, "ban", penalty.remaining_str()),
-                daemon=True,
-            ).start()
-            return jsonify({
-                "success": False,
-                "data": {
-                    "status": "incorrect",
-                    "message": (
-                        "🚨 Esa flag pertenece a otro equipo. "
-                        "Esto ha sido registrado. Ban de 2 horas."
-                    ),
-                },
-            }), 200
+        if has_instance:
+            return  # OK
 
-    # ─── Inyectar script en TODAS las páginas via after_request ──────────────
+        # Sin instancia en reto Whaley → ban
+        chal = Challenges.query.get(int(challenge_id))
+        chal_name = chal.name if chal else f"reto#{challenge_id}"
+
+        if user.team_id:
+            team = Teams.query.get(user.team_id)
+            team_name = team.name if team else f"equipo#{user.team_id}"
+
+            existing_ban = _is_team_banned(user.team_id)
+            if not existing_ban:
+                _ban_team(
+                    team_id      = user.team_id,
+                    reason       = f"Intentó usar flag del reto '{chal_name}' sin tener instancia activa",
+                    challenge_id = int(challenge_id),
+                    hours        = get_ban_hours(),
+                )
+                _revoke_achievements_for_team(user.team_id)
+                _nullify_all_fast_resolves(user.team_id)
+                _kill_team_instances(user.team_id)
+                _emit_siem_event(
+                    event_type="team_ban",
+                    severity="critical",
+                    team=team_name,
+                    team_id=user.team_id,
+                    player=user.name,
+                    player_id=user.id,
+                    challenge=chal_name,
+                    challenge_id=int(challenge_id),
+                    message=f"🚨 Equipo '{team_name}' baneado {get_ban_hours()}h — intentó flag en '{chal_name}' sin instancia activa",
+                    metadata={"ban_hours": get_ban_hours(), "reason": "no_instance"},
+                )
+                _discord_no_instance_ban(team_name, chal_name, get_ban_hours())
+                print(f"[Whaley] Equipo '{team_name}' baneado {get_ban_hours()}h — sin instancia en '{chal_name}'")
+
+            ban_record = _is_team_banned(user.team_id)
+            remaining  = ban_record.remaining_str() if ban_record else f"{get_ban_hours()}h"
+        else:
+            # Usuario sin equipo — ban individual
+            existing = WhaleyPenalty.query.filter(
+                WhaleyPenalty.user_id == user.id,
+                WhaleyPenalty.expires_at > now,
+            ).first()
+            if not existing:
+                penalty = WhaleyPenalty(
+                    user_id=user.id,
+                    penalty_type="ban",
+                    reason=f"Intentó usar flag del reto '{chal_name}' sin instancia propia",
+                    challenge_id=int(challenge_id),
+                    expires_at=now + timedelta(hours=get_ban_hours()),
+                )
+                db.session.add(penalty)
+                db.session.commit()
+            remaining = f"{get_ban_hours()}h"
+
+        return jsonify({"success": False, "data": {
+            "status": "incorrect",
+            "message": (
+                f"🚨 Tu equipo no tiene instancia de este reto. "
+                f"Ban de {remaining}. Todos los logros del equipo revocados."
+            ),
+        }}), 200
+
+    # ── Inject JS en páginas HTML ─────────────────────────────────────────────
     @app.after_request
     def inject_whaley_script(response):
-        """Inyecta el JS de Whaley en páginas HTML antes de </head>."""
         if response.content_type and "text/html" in response.content_type:
             data = response.get_data(as_text=True)
             if "</head>" in data and "whaley.js" not in data:
@@ -407,54 +939,7 @@ def load(app):
                 response.set_data(data)
         return response
 
-    def whaley_headers(token):
-        """Cabeceras correctas para autenticar contra Whaley con token de CTFd."""
-        return {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
-
-    # Caché del mapeo CTFd numeric ID → Whaley local ID
-    # Formato: {ctfd_id_str: (local_id, timestamp)}
-    _whaley_id_cache: dict = {}
-    _WHALEY_CACHE_TTL = 60  # segundos
-
-    def resolve_whaley_id(ctfd_challenge_id, token):
-        """
-        Convierte el ID numérico de CTFd al ID de texto local de Whaley.
-        Usa caché en memoria con TTL de 60 s para evitar una llamada HTTP
-        a /admin/api/flags en cada spawn/status/stop.
-        """
-        import time
-        key = str(ctfd_challenge_id)
-        cached = _whaley_id_cache.get(key)
-        if cached:
-            local_id, ts = cached
-            if time.time() - ts < _WHALEY_CACHE_TTL:
-                return local_id
-
-        whaley_base = get_whaley_url()
-        try:
-            resp = requests.get(
-                f"{whaley_base}/admin/api/flags",
-                headers=whaley_headers(token),
-                timeout=10
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                mapping = data.get("challenge_mapping", {})
-                # Refrescar toda la tabla de caché de una sola vez
-                now = time.time()
-                for local_id, mapped_ctfd_id in mapping.items():
-                    _whaley_id_cache[str(mapped_ctfd_id)] = (local_id, now)
-                if key in _whaley_id_cache:
-                    return _whaley_id_cache[key][0]
-        except Exception:
-            pass
-        return key
-
-    # ─── API: Spawn de instancia ──────────────────────────────────────────────
-    # Ruta real de Whaley: POST /instances/spawn
+    # ── API: Spawn ────────────────────────────────────────────────────────────
     @plugin_bp.route("/api/whaley/spawn", methods=["POST"])
     @authed_only
     def whaley_spawn():
@@ -463,213 +948,181 @@ def load(app):
         if not ctfd_challenge_id:
             return jsonify({"success": False, "message": "challenge_id requerido"}), 400
 
-        token = get_user_token()
+        token = _get_user_token()
         if not token:
             return jsonify({
                 "success": False,
-                "message": "No tienes un Access Token. Ve a Settings \u2192 Access Tokens y crea uno."
+                "message": "No tienes Access Token. Ve a Settings → Access Tokens y crea uno.",
             }), 403
 
-        # Convertir ID numérico de CTFd → ID texto local de Whaley
-        whaley_challenge_id = resolve_whaley_id(ctfd_challenge_id, token)
+        # Bloquear spawn si el equipo está baneado
+        _spawn_user = get_current_user()
+        if _spawn_user and _spawn_user.team_id:
+            _active_ban = _is_team_banned(_spawn_user.team_id)
+            if _active_ban:
+                return jsonify({
+                    "success": False,
+                    "message": f"Tu equipo está suspendido. Tiempo restante: {_active_ban.remaining_str()}.",
+                }), 403
 
+        whaley_challenge_id = _resolve_whaley_id(ctfd_challenge_id, token)
         whaley_base = get_whaley_url()
         try:
             resp = requests.post(
                 f"{whaley_base}/instances/spawn",
                 json={"challenge_id": whaley_challenge_id},
-                headers=whaley_headers(token),
-                timeout=30
+                headers=_whaley_user_headers(token),
+                timeout=30,
             )
             result = resp.json()
 
-            # Normalizar la respuesta para el JS del frontend
             if resp.status_code == 200 and result.get("success"):
                 try:
                     user = get_current_user()
                     if user:
-                        # Guardar en base de datos la fecha de inicio
                         log = WhaleyInstanceLog(user_id=user.id, challenge_id=ctfd_challenge_id)
                         db.session.add(log)
                         db.session.commit()
                 except Exception as e:
-                    print("Error registrando log de instancia Whaley:", e)
-                    
-                instance = result.get("instance", {})
-                public_urls = instance.get("public_urls", {})
-                # Tomar el primer puerto disponible
-                first_url = instance.get("public_url", "")
-                host, port = ("", "")
+                    print(f"[Whaley] Error registrando log de instancia: {e}")
+
+                instance    = result.get("instance", {})
+                first_url   = instance.get("public_url", "")
+                host = port = ""
                 if first_url and ":" in first_url:
                     parts = first_url.rsplit(":", 1)
                     host, port = parts[0], parts[1]
-
-                expires_at = instance.get("expires_at", "")
                 return jsonify({
-                    "success": True,
-                    "host": host,
-                    "port": port,
+                    "success":    True,
+                    "host":       host,
+                    "port":       port,
                     "public_url": first_url,
-                    "public_urls": public_urls,
+                    "public_urls": instance.get("public_urls", {}),
                     "instance_id": instance.get("instance_id", ""),
                     "expires_in": 3600,
-                    "expires_at": expires_at
+                    "expires_at": instance.get("expires_at", ""),
                 })
             return jsonify({"success": False, "message": result.get("detail", str(result))}), resp.status_code
 
         except requests.exceptions.ConnectionError:
             return jsonify({
                 "success": False,
-                "message": f"No se puede conectar a Whaley en {whaley_base}. ¿Está corriendo?"
+                "message": f"No se puede conectar a Whaley en {whaley_base}. ¿Está corriendo?",
             }), 503
         except Exception as e:
             return jsonify({"success": False, "message": str(e)}), 500
 
-    # ─── API: Estado de instancia ─────────────────────────────────────────────
-    # Ruta real de Whaley: GET /instances  (lista y filtramos por challenge_id)
+    # ── API: Status ───────────────────────────────────────────────────────────
     @plugin_bp.route("/api/whaley/status/<challenge_id>", methods=["GET"])
     @authed_only
     def whaley_status(challenge_id):
-        token = get_user_token()
+        token = _get_user_token()
         if not token:
             return jsonify({"running": False}), 200
 
-        current_user = get_current_user()
-        whaley_challenge_id = resolve_whaley_id(challenge_id, token)
-        whaley_base = get_whaley_url()
+        current_user       = get_current_user()
+        whaley_challenge_id = _resolve_whaley_id(challenge_id, token)
+        whaley_base        = get_whaley_url()
         try:
-            resp = requests.get(
-                f"{whaley_base}/instances",
-                headers=whaley_headers(token),
-                timeout=10
-            )
+            resp = requests.get(f"{whaley_base}/instances", headers=_whaley_user_headers(token), timeout=10)
             if resp.status_code != 200:
                 return jsonify({"running": False}), 200
 
-            instances = resp.json().get("instances", [])
-            for inst in instances:
-                if str(inst.get("challenge_id", "")) == str(whaley_challenge_id) or str(inst.get("challenge_id", "")) == str(challenge_id):
+            for inst in resp.json().get("instances", []):
+                if str(inst.get("challenge_id", "")) in (str(whaley_challenge_id), str(challenge_id)):
                     public_url = inst.get("public_url", "")
-                    host, port = ("", "")
+                    host = port = ""
                     if public_url and ":" in public_url:
                         parts = public_url.rsplit(":", 1)
                         host, port = parts[0], parts[1]
-                    owner_user_id = str(inst.get("user_id", ""))
-                    is_mine = (owner_user_id == str(current_user.id)) if current_user else False
+                    is_mine = str(inst.get("user_id", "")) == str(current_user.id) if current_user else False
                     return jsonify({
-                        "running": True,
-                        "host": host,
-                        "port": port,
-                        "public_url": public_url,
+                        "running":     True,
+                        "host":        host,
+                        "port":        port,
+                        "public_url":  public_url,
                         "public_urls": inst.get("public_urls", {}),
                         "instance_id": inst.get("instance_id", ""),
-                        "expires_at": inst.get("expires_at", ""),
-                        "spawned_by": inst.get("username", ""),
-                        "is_mine": is_mine,
+                        "expires_at":  inst.get("expires_at", ""),
+                        "spawned_by":  inst.get("username", ""),
+                        "is_mine":     is_mine,
                     })
             return jsonify({"running": False}), 200
         except Exception:
             return jsonify({"running": False}), 200
 
-    # ─── API: Lista de instancias ───────────────────────────────────────────────
+    # ── API: Lista de instancias ──────────────────────────────────────────────
     @plugin_bp.route("/api/whaley/instances", methods=["GET"])
     @authed_only
     def whaley_list_instances():
-        token = get_user_token()
+        token = _get_user_token()
         if not token:
             return jsonify({"instances": []}), 200
 
         current_user = get_current_user()
-        whaley_base = get_whaley_url()
+        whaley_base  = get_whaley_url()
         try:
-            resp = requests.get(
-                f"{whaley_base}/instances",
-                headers=whaley_headers(token),
-                timeout=10
-            )
+            resp = requests.get(f"{whaley_base}/instances", headers=_whaley_user_headers(token), timeout=10)
             if resp.status_code == 200:
                 instances = resp.json().get("instances", [])
                 for inst in instances:
-                    owner_id = str(inst.get("user_id", ""))
-                    inst["is_mine"] = (owner_id == str(current_user.id)) if current_user else False
+                    inst["is_mine"] = str(inst.get("user_id", "")) == str(current_user.id) if current_user else False
                     inst.setdefault("spawned_by", inst.get("username", ""))
                 return jsonify({"instances": instances}), 200
             return jsonify({"instances": []}), 200
         except Exception:
             return jsonify({"instances": []}), 200
 
+    # ── API: Estadísticas del reto (first blood + fastest) ───────────────────
     @plugin_bp.route("/api/whaley/stats/<int:challenge_id>", methods=["GET"])
     def whaley_stats(challenge_id):
-        from CTFd.models import Users, Teams
-        from CTFd.utils import get_config
-        first_blood = None
-        fastest = None
-        
-        mode = get_config("user_mode")
-        
-        # 1. First Blood
-        # Removemos filtros de hidden para que los admin aparezcan en sus pruebas
+        from CTFd.utils import get_config as _cfg
+        first_blood = fastest = None
+        mode = _cfg("user_mode")
+
         first_solve = Solves.query.filter_by(challenge_id=challenge_id).order_by(Solves.date.asc()).first()
-        
         if first_solve:
-            # Obtener nombre según el modo (Equipo o Usuario)
             name = ""
             if mode == "teams" and first_solve.team:
                 name = first_solve.team.name
             else:
                 name = first_solve.user.name
-                
-            first_blood = {
-                "user_name": name,
-                "date": first_solve.date.isoformat() if first_solve.date else None
-            }
-            
-        # 2. Fastest Solve (Instancia Whaley)
-        fastest_log = WhaleyInstanceLog.query.filter(
-            WhaleyInstanceLog.challenge_id == challenge_id,
-            WhaleyInstanceLog.duration_seconds != None
-        ).order_by(WhaleyInstanceLog.duration_seconds.asc()).first()
-        
+            first_blood = {"user_name": name, "date": first_solve.date.isoformat() if first_solve.date else None}
+
+        fastest_log = (
+            WhaleyInstanceLog.query
+            .filter(WhaleyInstanceLog.challenge_id == challenge_id,
+                    WhaleyInstanceLog.duration_seconds.isnot(None))
+            .order_by(WhaleyInstanceLog.duration_seconds.asc())
+            .first()
+        )
         if fastest_log:
             duration = int(fastest_log.duration_seconds)
             mins, secs = divmod(duration, 60)
             hours, mins = divmod(mins, 60)
-            if hours > 0:
-                time_str = f"{hours}h {mins}m {secs}s"
-            elif mins > 0:
-                time_str = f"{mins}m {secs}s"
-            else:
-                time_str = f"{secs}s"
-                
-            user = Users.query.get(fastest_log.user_id)
-            if user:
-                # Si estamos en modo equipos, queremos el nombre del equipo para que coincida con la tabla de Solves
-                display_name = user.name
-                if mode == "teams" and user.team:
-                    display_name = user.team.name
-                    
-                fastest = {
-                    "user_name": display_name,
-                    "time_str": time_str,
-                    "seconds": duration
-                }
-            
-        return jsonify({
-            "first_blood": first_blood,
-            "fastest": fastest
-        }), 200
+            if hours:    time_str = f"{hours}h {mins}m {secs}s"
+            elif mins:   time_str = f"{mins}m {secs}s"
+            else:        time_str = f"{secs}s"
+            u = Users.query.get(fastest_log.user_id)
+            if u:
+                display_name = u.name
+                if mode == "teams" and u.team:
+                    display_name = u.team.name
+                fastest = {"user_name": display_name, "time_str": time_str, "seconds": duration}
 
-    # ─── API: Extender instancia (+N minutos) ────────────────────────────────
+        return jsonify({"first_blood": first_blood, "fastest": fastest}), 200
+
+    # ── API: Extender instancia ───────────────────────────────────────────────
     @plugin_bp.route("/api/whaley/extend", methods=["POST"])
     @authed_only
     def whaley_extend():
-        data = request.get_json()
-        instance_id = data.get("instance_id")
+        data         = request.get_json()
+        instance_id  = data.get("instance_id")
         extra_minutes = int(data.get("extra_minutes", 30))
         if not instance_id:
             return jsonify({"success": False, "message": "instance_id requerido"}), 400
 
-        token = get_user_token()
+        token = _get_user_token()
         if not token:
             return jsonify({"success": False, "message": "Sin token"}), 403
 
@@ -678,8 +1131,8 @@ def load(app):
             resp = requests.post(
                 f"{whaley_base}/instances/{instance_id}/extend",
                 json={"extra_minutes": extra_minutes},
-                headers=whaley_headers(token),
-                timeout=15
+                headers=_whaley_user_headers(token),
+                timeout=15,
             )
             result = resp.json()
             if resp.status_code == 200:
@@ -688,33 +1141,27 @@ def load(app):
         except Exception as e:
             return jsonify({"success": False, "message": str(e)}), 500
 
-    # ─── API: Terminar instancia ──────────────────────────────────────────────
-    # Ruta real de Whaley: DELETE /instances/{instance_id}
+    # ── API: Detener instancia ────────────────────────────────────────────────
     @plugin_bp.route("/api/whaley/stop", methods=["POST"])
     @authed_only
     def whaley_stop():
-        data = request.get_json()
+        data        = request.get_json()
         instance_id = data.get("instance_id")
         challenge_id = data.get("challenge_id")
-        token = get_user_token()
+        token       = _get_user_token()
 
         if not token:
             return jsonify({"success": False, "message": "Sin token"}), 403
 
         whaley_base = get_whaley_url()
 
-        # Si no tenemos instance_id directo, buscarlo primero
         if not instance_id and challenge_id:
-            whaley_challenge_id = resolve_whaley_id(challenge_id, token)
+            whaley_challenge_id = _resolve_whaley_id(challenge_id, token)
             try:
-                resp = requests.get(
-                    f"{whaley_base}/instances",
-                    headers=whaley_headers(token),
-                    timeout=10
-                )
+                resp = requests.get(f"{whaley_base}/instances", headers=_whaley_user_headers(token), timeout=10)
                 if resp.status_code == 200:
                     for inst in resp.json().get("instances", []):
-                        if str(inst.get("challenge_id", "")) == str(whaley_challenge_id) or str(inst.get("challenge_id", "")) == str(challenge_id):
+                        if str(inst.get("challenge_id", "")) in (str(whaley_challenge_id), str(challenge_id)):
                             instance_id = inst.get("instance_id")
                             break
             except Exception:
@@ -726,8 +1173,8 @@ def load(app):
         try:
             resp = requests.delete(
                 f"{whaley_base}/instances/{instance_id}",
-                headers=whaley_headers(token),
-                timeout=15
+                headers=_whaley_user_headers(token),
+                timeout=15,
             )
             if resp.status_code in (200, 204):
                 return jsonify({"success": True})
@@ -735,45 +1182,28 @@ def load(app):
         except Exception as e:
             return jsonify({"success": False, "message": str(e)}), 500
 
-    # ─── Admin: Configuración (visible en /admin/whaley) ─────────────────────
-    @plugin_bp.route("/admin/whaley", methods=["GET", "POST"])
-    @admins_only
-    def whaley_admin_config():
-        saved = False
-        conn_status = None
-        conn_ok = False
-
-        if request.method == "POST":
-            set_config("whaley_url", request.form.get("whaley_url", "").rstrip("/"))
-            saved = True
-
-        # Test de conexión — usa /health (ruta real de Whaley)
-        if request.args.get("test"):
-            try:
-                resp = requests.get(get_whaley_url() + "/health", timeout=5)
-                conn_ok = resp.status_code < 400
-                conn_status = f"✓ Whaley responde en {get_whaley_url()} (HTTP {resp.status_code})" if conn_ok \
-                              else f"✗ Whaley respondió HTTP {resp.status_code}"
-            except Exception as e:
-                conn_status = f"✗ No se pudo conectar: {e}"
-                conn_ok = False
-
-        return render_template_string(
-            ADMIN_PAGE,
-            current_url=get_whaley_url(),
-            saved=saved,
-            conn_status=conn_status,
-            conn_ok=conn_ok
-        )
-
-    # ─── API: Penalizaciones activas (para el usuario actual) ────────────────
+    # ── API: Penalización activa del usuario ──────────────────────────────────
     @plugin_bp.route("/api/whaley/my-penalty", methods=["GET"])
     @authed_only
     def whaley_my_penalty():
-        """Devuelve la penalización activa del usuario actual, si existe."""
         user = get_current_user()
         if not user:
             return jsonify({"active": False}), 200
+
+        # Verificar ban de equipo primero
+        if user.team_id:
+            team_ban = _is_team_banned(user.team_id)
+            if team_ban:
+                return jsonify({
+                    "active":           True,
+                    "type":             "team_ban",
+                    "reason":           team_ban.reason,
+                    "remaining_seconds": team_ban.remaining_seconds(),
+                    "remaining_str":    team_ban.remaining_str(),
+                    "expires_at":       team_ban.expires_at.isoformat(),
+                }), 200
+
+        # Verificar ban individual
         now = datetime.utcnow()
         penalty = (
             WhaleyPenalty.query
@@ -784,60 +1214,18 @@ def load(app):
         if not penalty:
             return jsonify({"active": False}), 200
         return jsonify({
-            "active": True,
-            "type": penalty.penalty_type,
-            "reason": penalty.reason,
+            "active":           True,
+            "type":             penalty.penalty_type,
+            "reason":           penalty.reason,
             "remaining_seconds": penalty.remaining_seconds(),
-            "remaining_str": penalty.remaining_str(),
-            "expires_at": penalty.expires_at.isoformat(),
+            "remaining_str":    penalty.remaining_str(),
+            "expires_at":       penalty.expires_at.isoformat(),
         }), 200
 
-    # ─── API Admin: Ver todas las penalizaciones ──────────────────────────────
-    @plugin_bp.route("/api/whaley/admin/penalties", methods=["GET"])
-    @admins_only
-    def whaley_admin_penalties():
-        """Lista todas las penalizaciones (activas e históricas)."""
-        from CTFd.models import Users
-        active_only = request.args.get("active") == "1"
-        now = datetime.utcnow()
-        q = WhaleyPenalty.query
-        if active_only:
-            q = q.filter(WhaleyPenalty.expires_at > now)
-        penalties = q.order_by(WhaleyPenalty.created_at.desc()).limit(200).all()
-        result = []
-        for p in penalties:
-            u = Users.query.get(p.user_id)
-            result.append({
-                "id": p.id,
-                "username": u.name if u else f"user#{p.user_id}",
-                "type": p.penalty_type,
-                "reason": p.reason,
-                "challenge_id": p.challenge_id,
-                "created_at": p.created_at.isoformat(),
-                "expires_at": p.expires_at.isoformat(),
-                "active": p.is_active(),
-                "remaining_str": p.remaining_str() if p.is_active() else "expirada",
-            })
-        return jsonify({"penalties": result}), 200
-
-    # ─── API Admin: Levantar penalización manualmente ────────────────────────
-    @plugin_bp.route("/api/whaley/admin/penalties/<int:penalty_id>/lift", methods=["POST"])
-    @admins_only
-    def whaley_admin_lift_penalty(penalty_id):
-        """El admin puede levantar una penalización antes de que expire."""
-        penalty = WhaleyPenalty.query.get(penalty_id)
-        if not penalty:
-            return jsonify({"success": False, "message": "Penalización no encontrada"}), 404
-        penalty.expires_at = datetime.utcnow()
-        db.session.commit()
-        return jsonify({"success": True, "message": "Penalización levantada"}), 200
-
-    # ─── API: Actividad del equipo ────────────────────────────────────────────
+    # ── API: Actividad del equipo ─────────────────────────────────────────────
     @plugin_bp.route("/api/whaley/team-activity", methods=["GET"])
     @authed_only
     def whaley_team_activity():
-        from CTFd.models import Teams, Users, Challenges
-
         user = get_current_user()
         if not user:
             return jsonify({"events": []})
@@ -855,41 +1243,226 @@ def load(app):
             .limit(40)
             .all()
         )
-
         events = []
         for log in logs:
             u = Users.query.get(log.user_id)
             c = Challenges.query.get(log.challenge_id)
-            username = u.name if u else f"user#{log.user_id}"
+            username  = u.name if u else f"user#{log.user_id}"
             chal_name = c.name if c else f"reto#{log.challenge_id}"
-            is_me = (log.user_id == user.id)
+            is_me     = (log.user_id == user.id)
 
             if log.solve_time and log.duration_seconds is not None:
                 mins, secs = divmod(int(log.duration_seconds), 60)
                 duration_str = f"{mins}m {secs}s" if mins else f"{secs}s"
                 events.append({
-                    "type": "solved",
-                    "username": username,
-                    "challenge": chal_name,
-                    "time": log.solve_time.isoformat() + "Z",
-                    "duration": duration_str,
-                    "is_me": is_me,
+                    "type": "solved", "username": username,
+                    "challenge": chal_name, "time": log.solve_time.isoformat() + "Z",
+                    "duration": duration_str, "is_me": is_me,
                 })
-
             if log.start_time:
                 events.append({
-                    "type": "started",
-                    "username": username,
-                    "challenge": chal_name,
-                    "time": log.start_time.isoformat() + "Z",
+                    "type": "started", "username": username,
+                    "challenge": chal_name, "time": log.start_time.isoformat() + "Z",
                     "is_me": is_me,
                 })
 
         events.sort(key=lambda x: x["time"], reverse=True)
         return jsonify({"events": events[:20]})
 
+    # ════════════════════════════════════════════════════════════════════════════
+    # ADMIN ENDPOINTS
+    # ════════════════════════════════════════════════════════════════════════════
+
+    # ── Admin: Configuración del plugin ──────────────────────────────────────
+    @plugin_bp.route("/admin/whaley", methods=["GET", "POST"])
+    @admins_only
+    def whaley_admin_config():
+        saved = conn_status = None
+        conn_ok = False
+        if request.method == "POST":
+            set_config("whaley_url", request.form.get("whaley_url", "").rstrip("/"))
+            new_hours = request.form.get("ban_hours", "")
+            try:
+                set_config("ban_hours", str(max(1, int(new_hours)))) if new_hours else None
+            except (ValueError, TypeError):
+                pass
+            saved = True
+        if request.args.get("test"):
+            try:
+                resp = requests.get(get_whaley_url() + "/health", timeout=5)
+                conn_ok = resp.status_code < 400
+                conn_status = (
+                    f"Whaley responde en {get_whaley_url()} (HTTP {resp.status_code})"
+                    if conn_ok else f"Whaley respondió HTTP {resp.status_code}"
+                )
+            except Exception as e:
+                conn_status = f"No se pudo conectar: {e}"
+        # Active bans for admin panel
+        now = datetime.utcnow()
+        active_bans_q = TeamRedFlag.query.filter(
+            TeamRedFlag.expires_at > now,
+            TeamRedFlag.lifted_at.is_(None),
+        ).order_by(TeamRedFlag.banned_at.desc()).all()
+        active_bans = []
+        for b in active_bans_q:
+            team = Teams.query.get(b.team_id)
+            active_bans.append({
+                "id":           b.id,
+                "team_name":    team.name if team else f"equipo#{b.team_id}",
+                "reason":       b.reason,
+                "remaining_str": b.remaining_str(),
+                "expires_at":   b.expires_at.strftime("%Y-%m-%d %H:%M"),
+            })
+        return render_template_string(
+            ADMIN_PAGE,
+            current_url=get_whaley_url(),
+            ban_hours=get_ban_hours(),
+            saved=saved,
+            conn_status=conn_status,
+            conn_ok=conn_ok,
+            active_bans=active_bans,
+            nonce=session.get("nonce"),
+        )
+
+    # ── Admin: Ver penalizaciones individuales ────────────────────────────────
+    @plugin_bp.route("/api/whaley/admin/penalties", methods=["GET"])
+    @admins_only
+    def whaley_admin_penalties():
+        active_only = request.args.get("active") == "1"
+        now = datetime.utcnow()
+        q   = WhaleyPenalty.query
+        if active_only:
+            q = q.filter(WhaleyPenalty.expires_at > now)
+        penalties = q.order_by(WhaleyPenalty.created_at.desc()).limit(200).all()
+        result = []
+        for p in penalties:
+            u = Users.query.get(p.user_id)
+            result.append({
+                "id":           p.id,
+                "username":     u.name if u else f"user#{p.user_id}",
+                "type":         p.penalty_type,
+                "reason":       p.reason,
+                "challenge_id": p.challenge_id,
+                "created_at":   p.created_at.isoformat(),
+                "expires_at":   p.expires_at.isoformat(),
+                "active":       p.is_active(),
+                "remaining_str": p.remaining_str() if p.is_active() else "expirada",
+            })
+        return jsonify({"penalties": result}), 200
+
+    @plugin_bp.route("/api/whaley/admin/penalties/<int:penalty_id>/lift", methods=["POST"])
+    @admins_only
+    def whaley_admin_lift_penalty(penalty_id):
+        penalty = WhaleyPenalty.query.get(penalty_id)
+        if not penalty:
+            return jsonify({"success": False, "message": "No encontrada"}), 404
+        penalty.expires_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({"success": True}), 200
+
+    # ── Admin: Ver equipos en Red Flag ────────────────────────────────────────
+    @plugin_bp.route("/api/whaley/admin/red-flags", methods=["GET"])
+    @admins_only
+    def whaley_admin_red_flags():
+        """Lista todos los equipos baneados (activos e históricos)."""
+        active_only = request.args.get("active") == "1"
+        now = datetime.utcnow()
+        q   = TeamRedFlag.query
+        if active_only:
+            q = q.filter(TeamRedFlag.expires_at > now, TeamRedFlag.lifted_at.is_(None))
+        records = q.order_by(TeamRedFlag.banned_at.desc()).limit(500).all()
+
+        result = []
+        for r in records:
+            team         = Teams.query.get(r.team_id)
+            related_team = Teams.query.get(r.related_team_id) if r.related_team_id else None
+            chal         = Challenges.query.get(r.challenge_id) if r.challenge_id else None
+            result.append({
+                "id":                r.id,
+                "team_id":           r.team_id,
+                "team_name":         team.name if team else f"equipo#{r.team_id}",
+                "reason":            r.reason,
+                "challenge_id":      r.challenge_id,
+                "challenge_name":    chal.name if chal else None,
+                "related_team_id":   r.related_team_id,
+                "related_team_name": related_team.name if related_team else None,
+                "offending_flag":    r.offending_flag,
+                "banned_at":         r.banned_at.isoformat(),
+                "expires_at":        r.expires_at.isoformat(),
+                "lifted_at":         r.lifted_at.isoformat() if r.lifted_at else None,
+                "active":            r.is_active(),
+                "remaining_str":     r.remaining_str() if r.is_active() else "expirado",
+                "members": [
+                    {"id": u.id, "name": u.name}
+                    for u in Users.query.filter_by(team_id=r.team_id).all()
+                ],
+            })
+        return jsonify({"red_flags": result, "total": len(result)}), 200
+
+    # ── Admin: Levantar ban de equipo manualmente ─────────────────────────────
+    @plugin_bp.route("/api/whaley/admin/red-flags/<int:record_id>/lift", methods=["POST"])
+    @admins_only
+    def whaley_admin_lift_red_flag(record_id):
+        record = TeamRedFlag.query.get(record_id)
+        if not record:
+            return jsonify({"success": False, "message": "Registro no encontrado"}), 404
+        admin = get_current_user()
+        record.lifted_at = datetime.utcnow()
+        record.lifted_by = admin.id if admin else None
+        db.session.commit()
+        team = Teams.query.get(record.team_id)
+        return jsonify({
+            "success":   True,
+            "message":   f"Ban del equipo '{team.name if team else record.team_id}' levantado.",
+        }), 200
+
+    # ── Admin: Ban manual de un equipo ────────────────────────────────────────
+    @plugin_bp.route("/api/whaley/admin/red-flags/ban", methods=["POST"])
+    @admins_only
+    def whaley_admin_manual_ban():
+        data     = request.get_json() or {}
+        team_id  = data.get("team_id")
+        reason   = data.get("reason", "Ban manual por administrador")
+        hours    = int(data.get("hours", BAN_HOURS))
+        if not team_id:
+            return jsonify({"success": False, "message": "team_id requerido"}), 400
+        team = Teams.query.get(int(team_id))
+        if not team:
+            return jsonify({"success": False, "message": "Equipo no encontrado"}), 404
+        record = _ban_team(team_id=int(team_id), reason=reason, hours=hours)
+        return jsonify({
+            "success":    True,
+            "message":    f"Equipo '{team.name}' baneado por {hours}h.",
+            "expires_at": record.expires_at.isoformat(),
+        }), 200
+
+    # ── Service: Banned teams (para SIEM, autenticación con X-Admin-Key) ────────
+    @plugin_bp.route("/api/whaley/service/banned-teams", methods=["GET"])
+    def whaley_service_banned_teams():
+        key = request.headers.get("X-Admin-Key", "")
+        if not WHALEY_ADMIN_KEY or key != WHALEY_ADMIN_KEY:
+            return jsonify({"error": "Unauthorized"}), 401
+        now = datetime.utcnow()
+        bans = TeamRedFlag.query.filter(
+            TeamRedFlag.expires_at > now,
+            TeamRedFlag.lifted_at.is_(None),
+        ).order_by(TeamRedFlag.banned_at.desc()).all()
+        result = []
+        for b in bans:
+            team = Teams.query.get(b.team_id)
+            result.append({
+                "id":               b.id,
+                "team_id":          b.team_id,
+                "team_name":        team.name if team else f"equipo#{b.team_id}",
+                "reason":           b.reason,
+                "banned_at":        b.banned_at.isoformat(),
+                "expires_at":       b.expires_at.isoformat(),
+                "remaining_seconds": b.remaining_seconds(),
+            })
+        return jsonify({"banned_teams": result}), 200
+
     app.register_blueprint(plugin_bp)
 
-    print("[Whaley Plugin] Cargado correctamente. Whaley URL:", get_whaley_url())
-    print("[Whaley Plugin] Anti-cheat guard activo: penalizaciones en tiempo real")
-    print("[Whaley Plugin] Panel de admin disponible en: /admin/whaley")
+    print(f"[Whaley Plugin] Cargado. URL: {get_whaley_url()}")
+    print(f"[Whaley Plugin] Anti-cheat activo: ban de equipo {BAN_HOURS}h · flag prefix '{WHALEY_FLAG_PREFIX}'")
+    print(f"[Whaley Plugin] Tabla teams_red_flag habilitada.")
