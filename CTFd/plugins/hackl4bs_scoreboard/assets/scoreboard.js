@@ -1,7 +1,14 @@
 (function() {
-    // Matches '/' and also CTFd home aliases like '' or '/?...'
+    // Inyectar en: home (/), challenges (/challenges), o cualquier página con jumbotron
     const path = window.location.pathname;
-    if (path !== '/' && path !== '') return;
+    const ALLOWED = ['/', '/challenges', ''];
+    const isAllowed = ALLOWED.includes(path) || path.startsWith('/challenges');
+
+    // No inyectar en páginas de admin ni auth
+    if (path.startsWith('/admin') || path.startsWith('/login') ||
+        path.startsWith('/register') || path.startsWith('/setup')) return;
+
+    if (!isAllowed) return;
 
     async function main() {
         try {
@@ -9,20 +16,22 @@
             if (!res.ok) return;
             const json = await res.json();
             if (!json.success || !json.data) return;
-            injectScoreboardUI(json.data);
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', () => injectScoreboardUI(json.data));
+            } else {
+                injectScoreboardUI(json.data);
+            }
         } catch (e) {
             console.error("[HackL4bs Scoreboard]", e);
         }
     }
 
-    // DOMContentLoaded may already have fired when this script runs
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', main);
-    } else {
-        main();
-    }
+    main();
 
     function injectScoreboardUI(data) {
+        // Evitar doble inyección
+        if (document.getElementById('hl-scoreboard-root')) return;
+
         const standings = data.standings || [];
         const titleText = data.title || '🏆 TOP 10 LEADERBOARD 🏆';
 
@@ -84,7 +93,6 @@
                 from { opacity: 0; transform: translateY(10px); }
                 to   { opacity: 1; transform: translateY(0); }
             }
-            /* ── Card ─────────────────────────────────────────────────── */
             .hl-sb-card {
                 background: var(--hl-surface);
                 border: 1px solid var(--hl-border);
@@ -110,7 +118,6 @@
                 border-color: rgba(124, 58, 237, 0.4);
                 background: rgba(124, 58, 237, 0.06);
             }
-            /* ── Rank ─────────────────────────────────────────────────── */
             .hl-sb-rank {
                 width: 44px;
                 height: 44px;
@@ -128,7 +135,6 @@
             .rank-1 { color: #f59e0b; }
             .rank-2 { color: #94a3b8; }
             .rank-3 { color: #b45309; }
-            /* ── Name + mini stats ────────────────────────────────────── */
             .hl-sb-info { flex-grow: 1; min-width: 0; }
             .hl-sb-name {
                 font-size: 1.1rem;
@@ -169,7 +175,6 @@
                 border: 1px solid rgba(245, 158, 11, 0.35);
                 color: var(--hl-fast);
             }
-            /* ── Score ────────────────────────────────────────────────── */
             .hl-sb-score {
                 font-family: var(--hl-mono);
                 font-size: 1.2rem;
@@ -190,7 +195,6 @@
                 flex-shrink: 0;
             }
             .hl-sb-card.open .hl-sb-chevron { transform: rotate(180deg); }
-            /* ── Details panel ────────────────────────────────────────── */
             .hl-sb-details {
                 max-height: 0;
                 overflow: hidden;
@@ -209,7 +213,6 @@
                 opacity: 1;
                 padding: 1.25rem 1.5rem 1.5rem;
             }
-            /* ── Stats summary row ────────────────────────────────────── */
             .hl-sb-stat-row {
                 display: flex;
                 gap: 1rem;
@@ -242,7 +245,6 @@
             .stat-solves .hl-sb-stat-num { color: var(--hl-cyan); }
             .stat-blood  .hl-sb-stat-num { color: var(--hl-blood); }
             .stat-fast   .hl-sb-stat-num { color: var(--hl-fast); }
-            /* ── Members grid ─────────────────────────────────────────── */
             .hl-sb-members-title {
                 font-family: var(--hl-mono);
                 font-size: 0.7rem;
@@ -285,8 +287,8 @@
         `;
         document.head.appendChild(style);
 
-        const target = document.querySelector('main') || document.body;
         const container = document.createElement('section');
+        container.id = 'hl-scoreboard-root';
         container.className = 'hl-sb-container';
 
         container.innerHTML = `
@@ -312,7 +314,6 @@
             item.className = 'hl-sb-item';
             item.style.animationDelay = `${idx * 0.05}s`;
 
-            // ── Rank icon ──────────────────────────────────────────────
             let rankClass = 'hl-sb-rank';
             let rankHTML  = `#${s.rank}`;
             if (s.rank <= 3) {
@@ -320,14 +321,12 @@
                 rankHTML = `<svg viewBox="0 0 24 24"><path d="M18,2H6V4H18V2M18,7V4H6V7C6,8.1 6.9,9 8,9H16C17.1,9 18,8.1 18,7M16,11V9H8V11C8,12.1 8.9,13 10,13H14C15.1,13 16,12.1 16,11M12,15C10.3,15 9,13.7 9,12H15C15,13.7 13.7,15 12,15M17,17V15H7V17L12,22L17,17Z"/></svg>`;
             }
 
-            // ── Mini badges ────────────────────────────────────────────
             const badgesHTML = `
                 <span class="hl-badge hl-badge-solves">⚡ ${s.solve_count ?? 0} retos</span>
                 ${s.first_blood > 0 ? `<span class="hl-badge hl-badge-blood">🩸 ${s.first_blood} first blood</span>` : ''}
                 ${s.fast_solve  > 0 ? `<span class="hl-badge hl-badge-fast">⚡ ${s.fast_solve} fast solve</span>`  : ''}
             `;
 
-            // ── Card ───────────────────────────────────────────────────
             const card = document.createElement('div');
             card.className = 'hl-sb-card';
             card.innerHTML = `
@@ -340,7 +339,6 @@
                 <span class="hl-sb-chevron">▼</span>
             `;
 
-            // ── Details panel ──────────────────────────────────────────
             const details = document.createElement('div');
             details.className = 'hl-sb-details';
 
@@ -379,7 +377,6 @@
                 </div>
             `;
 
-            // ── Toggle ─────────────────────────────────────────────────
             card.addEventListener('click', () => {
                 const isOpen = details.classList.contains('active');
                 document.querySelectorAll('.hl-sb-details.active').forEach(el => el.classList.remove('active'));
@@ -395,16 +392,20 @@
             list.appendChild(item);
         });
 
-        // Avoid double-inject on hot reload
-        if (document.getElementById('hl-scoreboard-root')) return;
-        container.id = 'hl-scoreboard-root';
+        // Punto de inyección: después del jumbotron → dentro del primer .container de main → prepend en main → body
+        const jumbotron    = document.querySelector('main .jumbotron, .jumbotron');
+        const mainContainer = document.querySelector('main .container, main > div');
+        const mainEl       = document.querySelector('main[role="main"], main');
 
-        // CTFd home: try jumbotron → main → body
-        const jumbotron = document.querySelector('.jumbotron');
-        const hero      = document.querySelector('.hl-hero');
-        if (hero)       hero.after(container);
-        else if (jumbotron) jumbotron.after(container);
-        else            target.prepend(container);
+        if (jumbotron) {
+            jumbotron.after(container);
+        } else if (mainContainer) {
+            mainContainer.after(container);
+        } else if (mainEl) {
+            mainEl.prepend(container);
+        } else {
+            document.body.appendChild(container);
+        }
     }
 
     function escHtml(str) {
