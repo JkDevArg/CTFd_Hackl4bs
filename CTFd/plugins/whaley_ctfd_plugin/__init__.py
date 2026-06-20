@@ -34,6 +34,14 @@ def get_ban_hours() -> int:
         return BAN_HOURS
 
 
+def is_anticheat_enabled() -> bool:
+    """Devuelve True si el anti-cheat está activo (por defecto sí)."""
+    val = get_config("anticheat_enabled")
+    if val is None:
+        return True
+    return str(val).lower() not in ("0", "false", "no", "off")
+
+
 def _emit_siem_event(
     event_type: str,
     severity: str = "high",
@@ -92,38 +100,221 @@ INJECT_SCRIPT = """
 ADMIN_PAGE = """
 {% extends "admin/base.html" %}
 {% block content %}
+<style>
+.badge-steal  { background:#dc3545; color:#fff; }
+.badge-leak   { background:#fd7e14; color:#fff; }
+.badge-noinstance { background:#ffc107; color:#000; }
+.badge-manual { background:#6c757d; color:#fff; }
+.badge-expired{ background:#dee2e6; color:#555; }
+.badge-lifted { background:#198754; color:#fff; }
+.reason-badge { font-size:0.75em; padding:2px 6px; border-radius:4px; white-space:nowrap; }
+</style>
 <div class="jumbotron">
   <div class="container">
     <h1>Whaley <span style="color:var(--primary)">Anti-Cheat</span></h1>
-    <p class="lead">Plugin de integración con instancias dinámicas y detección de trampas.</p>
+    <p class="lead mb-1">Panel de gestión de bans y configuración del plugin.</p>
+    <span class="badge {{ 'badge-success' if anticheat_enabled else 'badge-danger' }}">
+      Anti-cheat {{ 'ACTIVO' if anticheat_enabled else 'DESACTIVADO' }}
+    </span>
   </div>
 </div>
 <div class="container">
 
-  <div class="row">
-    <!-- Config -->
-    <div class="col-md-6">
-      <div class="card mb-4">
-        <div class="card-header"><strong>Configuración</strong></div>
+  <!-- Tabs -->
+  <ul class="nav nav-tabs mb-3" id="whaleyTabs">
+    <li class="nav-item">
+      <a class="nav-link active" data-toggle="tab" href="#tab-active">
+        🚨 Bans activos
+        {% if active_bans %}<span class="badge badge-danger ms-1">{{ active_bans|length }}</span>{% endif %}
+      </a>
+    </li>
+    <li class="nav-item">
+      <a class="nav-link" data-toggle="tab" href="#tab-history">📋 Historial</a>
+    </li>
+    <li class="nav-item">
+      <a class="nav-link" data-toggle="tab" href="#tab-ban">⛔ Ban manual</a>
+    </li>
+    <li class="nav-item">
+      <a class="nav-link" data-toggle="tab" href="#tab-config">⚙️ Configuración</a>
+    </li>
+  </ul>
+
+  <div class="tab-content">
+
+    <!-- ── Tab: Bans activos ── -->
+    <div class="tab-pane active" id="tab-active">
+      {% if active_bans %}
+      <div class="mb-3 d-flex gap-2">
+        <button id="unban-all-btn" class="btn btn-warning">
+          🔓 Desbanear TODOS ({{ active_bans|length }})
+        </button>
+        <div id="unban-all-msg"></div>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm table-hover align-middle">
+          <thead class="table-dark">
+            <tr>
+              <th>Equipo</th>
+              <th>Tipo</th>
+              <th>Reto</th>
+              <th>Equipo relacionado</th>
+              <th>Motivo</th>
+              <th>Flag</th>
+              <th>Baneado (UTC)</th>
+              <th>Tiempo restante</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for ban in active_bans %}
+            <tr id="ban-row-{{ ban.id }}">
+              <td><strong>{{ ban.team_name }}</strong></td>
+              <td>
+                {% if ban.reason_type == 'steal' %}
+                  <span class="reason-badge badge-steal">🔴 Flag robada</span>
+                {% elif ban.reason_type == 'leak' %}
+                  <span class="reason-badge badge-leak">🟠 Flag filtrada</span>
+                {% elif ban.reason_type == 'noinstance' %}
+                  <span class="reason-badge badge-noinstance">🟡 Sin instancia</span>
+                {% else %}
+                  <span class="reason-badge badge-manual">⚫ Manual</span>
+                {% endif %}
+              </td>
+              <td><small>{{ ban.challenge_name or '—' }}</small></td>
+              <td><small>{{ ban.related_team_name or '—' }}</small></td>
+              <td><small class="text-muted">{{ ban.reason }}</small></td>
+              <td><code style="font-size:0.7em">{{ ban.offending_flag or '—' }}</code></td>
+              <td><small>{{ ban.banned_at }}</small></td>
+              <td><span class="badge badge-warning text-dark">{{ ban.remaining_str }}</span></td>
+              <td>
+                <button class="btn btn-sm btn-outline-success unban-btn"
+                        data-id="{{ ban.id }}" data-name="{{ ban.team_name }}">
+                  Desbanear
+                </button>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="alert alert-success">✅ No hay equipos baneados actualmente.</div>
+      {% endif %}
+    </div>
+
+    <!-- ── Tab: Historial ── -->
+    <div class="tab-pane" id="tab-history">
+      {% if history_bans %}
+      <div class="table-responsive">
+        <table class="table table-sm table-hover align-middle">
+          <thead class="table-secondary">
+            <tr>
+              <th>Equipo</th>
+              <th>Tipo</th>
+              <th>Reto</th>
+              <th>Equipo relacionado</th>
+              <th>Motivo</th>
+              <th>Baneado (UTC)</th>
+              <th>Estado</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for ban in history_bans %}
+            <tr>
+              <td><strong>{{ ban.team_name }}</strong></td>
+              <td>
+                {% if ban.reason_type == 'steal' %}
+                  <span class="reason-badge badge-steal">🔴 Robó flag</span>
+                {% elif ban.reason_type == 'leak' %}
+                  <span class="reason-badge badge-leak">🟠 Flag filtrada</span>
+                {% elif ban.reason_type == 'noinstance' %}
+                  <span class="reason-badge badge-noinstance">🟡 Sin instancia</span>
+                {% else %}
+                  <span class="reason-badge badge-manual">⚫ Manual</span>
+                {% endif %}
+              </td>
+              <td><small>{{ ban.challenge_name or '—' }}</small></td>
+              <td><small>{{ ban.related_team_name or '—' }}</small></td>
+              <td><small class="text-muted">{{ ban.reason }}</small></td>
+              <td><small>{{ ban.banned_at }}</small></td>
+              <td>
+                {% if ban.lifted_at %}
+                  <span class="reason-badge badge-lifted">✅ Levantado {{ ban.lifted_at }}</span>
+                {% else %}
+                  <span class="reason-badge badge-expired">⏱ Expirado</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="text-muted">No hay historial de bans.</p>
+      {% endif %}
+    </div>
+
+    <!-- ── Tab: Ban manual ── -->
+    <div class="tab-pane" id="tab-ban">
+      <div class="card" style="max-width:500px">
+        <div class="card-header"><strong>Banear equipo manualmente</strong></div>
+        <div class="card-body">
+          <div class="mb-3">
+            <label class="form-label">Equipo</label>
+            <select id="manual-team-select" class="form-control">
+              <option value="">— Seleccionar equipo —</option>
+              {% for team in all_teams %}
+              <option value="{{ team.id }}">{{ team.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Motivo</label>
+            <input type="text" id="manual-reason" class="form-control"
+                   placeholder="Descripción del motivo..." value="Ban manual por administrador">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Duración (horas)</label>
+            <input type="number" id="manual-hours" class="form-control"
+                   value="{{ ban_hours }}" min="1" max="168" style="max-width:100px">
+          </div>
+          <button id="manual-ban-btn" class="btn btn-danger">⛔ Aplicar ban</button>
+          <div id="manual-ban-msg" class="mt-2"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Tab: Configuración ── -->
+    <div class="tab-pane" id="tab-config">
+      <div class="card" style="max-width:520px">
+        <div class="card-header"><strong>Configuración del plugin</strong></div>
         <div class="card-body">
           <form method="POST">
             <div class="mb-3">
               <label class="form-label"><strong>URL de Whaley</strong></label>
               <input type="text" name="whaley_url" value="{{ current_url }}"
                      class="form-control" placeholder="http://host.docker.internal:8001">
-              <small class="text-muted">Dirección interna del servicio de instancias.</small>
             </div>
             <div class="mb-3">
               <label class="form-label"><strong>Duración del ban (horas)</strong></label>
               <input type="number" name="ban_hours" value="{{ ban_hours }}"
                      class="form-control" min="1" max="168" style="max-width:120px">
-              <small class="text-muted">Tiempo de suspensión automática al detectar trampa. Actual: <strong>{{ ban_hours }}h</strong></small>
+            </div>
+            <div class="mb-3">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" name="anticheat_enabled"
+                       id="anticheatToggle" value="1" {{ 'checked' if anticheat_enabled else '' }}>
+                <label class="form-check-label" for="anticheatToggle">
+                  <strong>Anti-cheat activo</strong>
+                </label>
+              </div>
+              <small class="text-muted">Desactivar suspende todos los bans automáticos en tiempo real.</small>
             </div>
             <button type="submit" class="btn btn-primary">Guardar</button>
-            <a href="?test=1" class="btn btn-outline-secondary ms-2">Probar conexión</a>
+            <a href="?test=1" class="btn btn-outline-secondary ms-2">Probar conexión a Whaley</a>
           </form>
           {% if saved %}
-          <div class="alert alert-success mt-3 mb-0">Configuración guardada correctamente.</div>
+          <div class="alert alert-success mt-3 mb-0">✅ Configuración guardada.</div>
           {% endif %}
           {% if conn_status %}
           <div class="alert {{ 'alert-success' if conn_ok else 'alert-danger' }} mt-3 mb-0">{{ conn_status }}</div>
@@ -132,104 +323,112 @@ ADMIN_PAGE = """
       </div>
     </div>
 
-    <!-- Desbanear -->
-    <div class="col-md-6">
-      <div class="card mb-4">
-        <div class="card-header">
-          <strong>Equipos Baneados</strong>
-          <span class="badge badge-danger ms-2">{{ active_bans|length }} activos</span>
-        </div>
-        <div class="card-body">
-          {% if active_bans %}
-          <div class="mb-3">
-            <label class="form-label"><strong>Seleccionar equipo para desbanear</strong></label>
-            <select id="ban-select" class="form-control mb-2">
-              {% for ban in active_bans %}
-              <option value="{{ ban.id }}">{{ ban.team_name }} — {{ ban.remaining_str }} restante</option>
-              {% endfor %}
-            </select>
-            <button id="unban-btn" class="btn btn-danger">Desbanear equipo</button>
-            <div id="unban-msg" class="mt-2" style="display:none"></div>
-          </div>
-          <script>
-          document.getElementById('unban-btn').onclick = function() {
-            var sel = document.getElementById('ban-select');
-            var id = sel.value;
-            if (!id) return;
-            var name = sel.options[sel.selectedIndex].text.split(' — ')[0];
-            if (!confirm('¿Desbanear al equipo "' + name + '"?')) return;
-            var btn = this;
-            btn.disabled = true;
-            var msg = document.getElementById('unban-msg');
-            msg.style.display = 'none';
-            fetch('/api/whaley/admin/red-flags/' + id + '/lift', {
-              method: 'POST',
-              credentials: 'same-origin',
-              headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-                'CSRF-Token': (window.init && window.init.csrfNonce) ? window.init.csrfNonce : ''
-              }
-            })
-            .then(function(r) {
-              if (r.redirected) throw new Error('Sesión expirada — recarga e intenta de nuevo');
-              return r.json();
-            })
-            .then(function(d) {
-              msg.style.display = '';
-              if (d.success) {
-                msg.innerHTML = '<div class="alert alert-success mb-0">' + d.message + '</div>';
-                setTimeout(function() { location.reload(); }, 1200);
-              } else {
-                msg.innerHTML = '<div class="alert alert-danger mb-0">' + (d.message || 'Error desconocido') + '</div>';
-                btn.disabled = false;
-              }
-            })
-            .catch(function(e) {
-              msg.style.display = '';
-              msg.innerHTML = '<div class="alert alert-danger mb-0">Error: ' + e.message + '</div>';
-              btn.disabled = false;
-            });
-          };
-          </script>
-          {% else %}
-          <p class="text-muted mb-0">No hay equipos baneados actualmente.</p>
-          {% endif %}
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Tabla de bans activos -->
-  {% if active_bans %}
-  <div class="card mb-4">
-    <div class="card-header"><strong>Detalle de bans activos</strong></div>
-    <div class="table-responsive">
-      <table class="table table-sm mb-0">
-        <thead>
-          <tr>
-            <th>Equipo</th>
-            <th>Motivo</th>
-            <th>Tiempo restante</th>
-            <th>Expira (UTC)</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for ban in active_bans %}
-          <tr>
-            <td><strong>{{ ban.team_name }}</strong></td>
-            <td><small class="text-muted">{{ ban.reason }}</small></td>
-            <td><span class="badge badge-warning">{{ ban.remaining_str }}</span></td>
-            <td><small class="text-muted">{{ ban.expires_at }}</small></td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </div>
-  {% endif %}
-
+  </div><!-- /tab-content -->
 </div>
+
+<script>
+function whaleyFetch(url, opts, successCb, errEl) {
+  fetch(url, Object.assign({
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'CSRF-Token': (window.init && window.init.csrfNonce) ? window.init.csrfNonce : ''
+    }
+  }, opts))
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    if (d.success) {
+      successCb(d);
+    } else {
+      errEl.innerHTML = '<div class="alert alert-danger mt-2 mb-0">' + (d.message||'Error') + '</div>';
+    }
+  })
+  .catch(function(e){
+    errEl.innerHTML = '<div class="alert alert-danger mt-2 mb-0">Error: ' + e.message + '</div>';
+  });
+}
+
+// Desbanear individual
+document.querySelectorAll('.unban-btn').forEach(function(btn){
+  btn.onclick = function(){
+    var id   = btn.dataset.id;
+    var name = btn.dataset.name;
+    if (!confirm('¿Desbanear al equipo "' + name + '"?')) return;
+    btn.disabled = true;
+    var msg = document.createElement('div');
+    whaleyFetch('/api/whaley/admin/red-flags/' + id + '/lift',
+      {method:'POST'},
+      function(d){
+        var row = document.getElementById('ban-row-' + id);
+        if (row) row.style.opacity = '0.4';
+        btn.textContent = '✅ Desbaneado';
+        setTimeout(function(){ location.reload(); }, 900);
+      },
+      msg
+    );
+    btn.parentNode.appendChild(msg);
+  };
+});
+
+// Desbanear todos
+var unbanAllBtn = document.getElementById('unban-all-btn');
+if (unbanAllBtn) {
+  unbanAllBtn.onclick = function(){
+    if (!confirm('¿Desbanear a TODOS los equipos actualmente baneados?')) return;
+    unbanAllBtn.disabled = true;
+    var msg = document.getElementById('unban-all-msg');
+    whaleyFetch('/api/whaley/admin/red-flags/lift-all',
+      {method:'POST'},
+      function(d){
+        msg.innerHTML = '<div class="alert alert-success mb-0">✅ ' + d.message + '</div>';
+        setTimeout(function(){ location.reload(); }, 1200);
+      },
+      msg
+    );
+  };
+}
+
+// Ban manual
+var manualBtn = document.getElementById('manual-ban-btn');
+if (manualBtn) {
+  manualBtn.onclick = function(){
+    var team_id = document.getElementById('manual-team-select').value;
+    var reason  = document.getElementById('manual-reason').value.trim();
+    var hours   = parseInt(document.getElementById('manual-hours').value);
+    if (!team_id) { alert('Selecciona un equipo.'); return; }
+    if (!reason)  { alert('Ingresa un motivo.'); return; }
+    var teamName = document.getElementById('manual-team-select').selectedOptions[0].text;
+    if (!confirm('¿Banear al equipo "' + teamName + '" por ' + hours + 'h?\nMotivo: ' + reason)) return;
+    manualBtn.disabled = true;
+    var msg = document.getElementById('manual-ban-msg');
+    whaleyFetch('/api/whaley/admin/red-flags/ban',
+      {method:'POST', body: JSON.stringify({team_id: team_id, reason: reason, hours: hours})},
+      function(d){
+        msg.innerHTML = '<div class="alert alert-success mb-0">✅ ' + d.message + '</div>';
+        setTimeout(function(){ location.reload(); }, 1500);
+      },
+      msg
+    );
+  };
+}
+
+// Tabs con data-toggle
+document.querySelectorAll('[data-toggle="tab"]').forEach(function(link){
+  link.onclick = function(e){
+    e.preventDefault();
+    document.querySelectorAll('[data-toggle="tab"]').forEach(function(l){ l.classList.remove('active'); });
+    document.querySelectorAll('.tab-pane').forEach(function(p){ p.classList.remove('active'); });
+    link.classList.add('active');
+    document.querySelector(link.getAttribute('href')).classList.add('active');
+  };
+});
+
+// Abrir tab de config si hay ?saved o ?test
+if (window.location.search.match(/saved|test/)) {
+  document.querySelector('[href="#tab-config"]').click();
+}
+</script>
 {% endblock %}
 """
 
@@ -759,6 +958,9 @@ def load(app):
           3. Si el reto tiene instancias Whaley y el equipo NO tiene ninguna → ban 4h al
              equipo tramposo.
         """
+        if not is_anticheat_enabled():
+            return
+
         if request.path != "/api/v1/challenges/attempt" or request.method != "POST":
             return
 
@@ -866,6 +1068,23 @@ def load(app):
 
         if has_instance:
             return  # OK
+
+        # DB dice no tiene instancia — verificar en vivo con Whaley antes de banear
+        try:
+            member_ids = {str(uid) for uid in _get_team_member_ids(user.team_id)} if user.team_id else {str(user.id)}
+            live_resp = requests.get(
+                get_whaley_url() + "/admin/api/instances",
+                headers=_whaley_service_headers(),
+                timeout=5,
+            )
+            if live_resp.status_code == 200:
+                live_instances = live_resp.json().get("instances", [])
+                for inst in live_instances:
+                    if str(inst.get("user_id", "")) in member_ids and str(inst.get("challenge_id", "")) == str(challenge_id):
+                        return  # Tiene instancia activa en Whaley — no banear
+        except Exception as e:
+            print(f"[Whaley] check instancia live falló ({e}) — fail open, no ban")
+            return  # No se puede confirmar → beneficio de la duda
 
         # Sin instancia en reto Whaley → ban
         chal = Challenges.query.get(int(challenge_id))
@@ -1286,6 +1505,9 @@ def load(app):
                 set_config("ban_hours", str(max(1, int(new_hours)))) if new_hours else None
             except (ValueError, TypeError):
                 pass
+            # Checkbox: presente = activo, ausente = desactivado
+            anticheat_val = "1" if request.form.get("anticheat_enabled") else "0"
+            set_config("anticheat_enabled", anticheat_val)
             saved = True
         if request.args.get("test"):
             try:
@@ -1297,30 +1519,73 @@ def load(app):
                 )
             except Exception as e:
                 conn_status = f"No se pudo conectar: {e}"
-        # Active bans for admin panel
+
+        def _reason_type(reason: str) -> str:
+            r = (reason or "").lower()
+            if "robada" in r or "robó" in r or "rob" in r:
+                return "steal"
+            if "filtrada" in r or "leak" in r or "comprometida" in r:
+                return "leak"
+            if "sin instancia" in r or "instancia" in r or "no_instance" in r:
+                return "noinstance"
+            return "manual"
+
+        def _build_ban_dict(b, include_remaining=True):
+            team         = Teams.query.get(b.team_id)
+            related_team = Teams.query.get(b.related_team_id) if b.related_team_id else None
+            chal         = Challenges.query.get(b.challenge_id) if b.challenge_id else None
+            d = {
+                "id":                b.id,
+                "team_name":         team.name if team else f"equipo#{b.team_id}",
+                "reason":            b.reason,
+                "reason_type":       _reason_type(b.reason),
+                "challenge_name":    chal.name if chal else None,
+                "related_team_name": related_team.name if related_team else None,
+                "offending_flag":    b.offending_flag,
+                "banned_at":         b.banned_at.strftime("%Y-%m-%d %H:%M"),
+                "expires_at":        b.expires_at.strftime("%Y-%m-%d %H:%M"),
+                "lifted_at":         b.lifted_at.strftime("%Y-%m-%d %H:%M") if b.lifted_at else None,
+            }
+            if include_remaining:
+                d["remaining_str"] = b.remaining_str()
+            return d
+
         now = datetime.utcnow()
-        active_bans_q = TeamRedFlag.query.filter(
-            TeamRedFlag.expires_at > now,
-            TeamRedFlag.lifted_at.is_(None),
-        ).order_by(TeamRedFlag.banned_at.desc()).all()
-        active_bans = []
-        for b in active_bans_q:
-            team = Teams.query.get(b.team_id)
-            active_bans.append({
-                "id":           b.id,
-                "team_name":    team.name if team else f"equipo#{b.team_id}",
-                "reason":       b.reason,
-                "remaining_str": b.remaining_str(),
-                "expires_at":   b.expires_at.strftime("%Y-%m-%d %H:%M"),
-            })
+
+        # Bans activos
+        active_bans = [
+            _build_ban_dict(b)
+            for b in TeamRedFlag.query.filter(
+                TeamRedFlag.expires_at > now,
+                TeamRedFlag.lifted_at.is_(None),
+            ).order_by(TeamRedFlag.banned_at.desc()).all()
+        ]
+
+        # Historial (expirados o levantados, últimos 100)
+        history_bans = [
+            _build_ban_dict(b, include_remaining=False)
+            for b in TeamRedFlag.query.filter(
+                db.or_(
+                    TeamRedFlag.expires_at <= now,
+                    TeamRedFlag.lifted_at.isnot(None),
+                )
+            ).order_by(TeamRedFlag.banned_at.desc()).limit(100).all()
+        ]
+
+        # Todos los equipos para el formulario de ban manual
+        all_teams = Teams.query.order_by(Teams.name.asc()).all()
+
         return render_template_string(
             ADMIN_PAGE,
             current_url=get_whaley_url(),
             ban_hours=get_ban_hours(),
+            anticheat_enabled=is_anticheat_enabled(),
             saved=saved,
             conn_status=conn_status,
             conn_ok=conn_ok,
             active_bans=active_bans,
+            history_bans=history_bans,
+            all_teams=all_teams,
             nonce=session.get("nonce"),
         )
 
@@ -1415,6 +1680,23 @@ def load(app):
             "success":   True,
             "message":   f"Ban del equipo '{team.name if team else record.team_id}' levantado.",
         }), 200
+
+    # ── Admin: Levantar TODOS los bans activos ───────────────────────────────
+    @plugin_bp.route("/api/whaley/admin/red-flags/lift-all", methods=["POST"])
+    @admins_only
+    def whaley_admin_lift_all_red_flags():
+        admin = get_current_user()
+        now = datetime.utcnow()
+        active = TeamRedFlag.query.filter(
+            TeamRedFlag.lifted_at.is_(None),
+            TeamRedFlag.expires_at > now,
+        ).all()
+        count = len(active)
+        for record in active:
+            record.lifted_at = now
+            record.lifted_by = admin.id if admin else None
+        db.session.commit()
+        return jsonify({"success": True, "message": f"{count} ban(s) levantado(s).", "lifted": count}), 200
 
     # ── Admin: Ban manual de un equipo ────────────────────────────────────────
     @plugin_bp.route("/api/whaley/admin/red-flags/ban", methods=["POST"])
