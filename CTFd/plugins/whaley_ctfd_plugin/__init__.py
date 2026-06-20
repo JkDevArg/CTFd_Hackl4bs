@@ -290,6 +290,7 @@ ADMIN_PAGE = """
         <div class="card-header"><strong>Configuración del plugin</strong></div>
         <div class="card-body">
           <form method="POST">
+            <input type="hidden" name="nonce" value="{{ nonce }}">
             <div class="mb-3">
               <label class="form-label"><strong>URL de Whaley</strong></label>
               <input type="text" name="whaley_url" value="{{ current_url }}"
