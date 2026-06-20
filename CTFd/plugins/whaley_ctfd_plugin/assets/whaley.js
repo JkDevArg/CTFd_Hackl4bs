@@ -620,6 +620,24 @@
       const dot = panel.querySelector(".whaley-status-dot");
       if (dot) { dot.className = "whaley-status-dot dot-yellow"; }
 
+      async function verifyAndShow(errorMsg) {
+        // Si hubo error, verificar si la instancia igual se creó antes de reactivar botón
+        try {
+          const sr = await fetch(`${WHALEY_API}/status/${challengeId}`);
+          const sd = await sr.json();
+          if (sd.running) {
+            showInstance(sd);
+            setMsg("✓ Instancia lista.", "success");
+            if (dot) dot.className = "whaley-status-dot dot-green";
+            document.dispatchEvent(new Event("whaley:instancesChanged"));
+            return;
+          }
+        } catch (e) { /* ignore */ }
+        setMsg(errorMsg, "error");
+        if (dot) dot.className = "whaley-status-dot dot-red";
+        startBtn.disabled = false;
+      }
+
       try {
         const resp = await fetch(`${WHALEY_API}/spawn`, {
           method: "POST",
@@ -637,13 +655,10 @@
           if (dot) dot.className = "whaley-status-dot dot-green";
           document.dispatchEvent(new Event("whaley:instancesChanged"));
         } else {
-          setMsg("✗ " + (data.message || "Error al iniciar"), "error");
-          if (dot) dot.className = "whaley-status-dot dot-red";
-          startBtn.disabled = false;
+          await verifyAndShow("✗ " + (data.message || "Error al iniciar"));
         }
       } catch (e) {
-        setMsg("✗ Error de conexión con Whaley", "error");
-        startBtn.disabled = false;
+        await verifyAndShow("✗ Error de conexión con Whaley");
       }
     });
 

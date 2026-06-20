@@ -278,7 +278,7 @@ ADMIN_PAGE = """
             <input type="number" id="manual-hours" class="form-control"
                    value="{{ ban_hours }}" min="1" max="168" style="max-width:100px">
           </div>
-          <button id="manual-ban-btn" class="btn btn-danger">⛔ Aplicar ban</button>
+          <button type="button" id="manual-ban-btn" class="btn btn-danger">⛔ Aplicar ban</button>
           <div id="manual-ban-msg" class="mt-2"></div>
         </div>
       </div>
@@ -328,25 +328,30 @@ ADMIN_PAGE = """
 </div>
 
 <script>
+function whaleyNonce() {
+  if (window.init && window.init.csrfNonce) return window.init.csrfNonce;
+  var m = document.querySelector('meta[name="csrf-token"]');
+  return m ? m.getAttribute('content') : '';
+}
 function whaleyFetch(url, opts, successCb, errEl) {
-  fetch(url, Object.assign({
-    credentials: 'same-origin',
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      'CSRF-Token': (window.init && window.init.csrfNonce) ? window.init.csrfNonce : ''
-    }
-  }, opts))
-  .then(function(r){ return r.json(); })
+  var headers = {'Content-Type':'application/json','Accept':'application/json','CSRF-Token':whaleyNonce()};
+  fetch(url, Object.assign({credentials:'same-origin', headers:headers}, opts))
+  .then(function(r){
+    if (!r.ok && r.status === 403) throw new Error('Acceso denegado (403) — recarga la página e intenta de nuevo');
+    return r.json();
+  })
   .then(function(d){
     if (d.success) {
       successCb(d);
     } else {
-      errEl.innerHTML = '<div class="alert alert-danger mt-2 mb-0">' + (d.message||'Error') + '</div>';
+      var msg = d.message || 'Error desconocido';
+      if (errEl) errEl.innerHTML = '<div class="alert alert-danger mt-2 mb-0">' + msg + '</div>';
+      else alert('Error: ' + msg);
     }
   })
   .catch(function(e){
-    errEl.innerHTML = '<div class="alert alert-danger mt-2 mb-0">Error: ' + e.message + '</div>';
+    if (errEl) errEl.innerHTML = '<div class="alert alert-danger mt-2 mb-0">' + e.message + '</div>';
+    else alert('Error: ' + e.message);
   });
 }
 
@@ -894,6 +899,10 @@ def record_whaley_solve_time(mapper, connection, target):
         print(f"[Whaley] Error en record_whaley_solve_time: {e}")
 
 
+# ── Spawn in-progress lock (evita doble spawn por el mismo usuario+reto) ───────
+_spawn_in_progress: set = set()
+_spawn_lock_mutex = threading.Lock()
+
 # ── ID cache (CTFd ID → Whaley local ID) ───────────────────────────────────────
 _whaley_id_cache: dict = {}
 _WHALEY_CACHE_TTL = 60
@@ -1187,6 +1196,15 @@ def load(app):
 
         whaley_challenge_id = _resolve_whaley_id(ctfd_challenge_id, token)
         whaley_base = get_whaley_url()
+
+        # Evitar doble spawn concurrente del mismo usuario para el mismo reto
+        _spawn_user = get_current_user()
+        _lock_key = f"{_spawn_user.id}:{ctfd_challenge_id}"
+        with _spawn_lock_mutex:
+            if _lock_key in _spawn_in_progress:
+                return jsonify({"success": False, "message": "Ya hay un spawn en proceso para este reto, espera un momento."}), 429
+            _spawn_in_progress.add(_lock_key)
+
         try:
             resp = requests.post(
                 f"{whaley_base}/instances/spawn",
@@ -1231,6 +1249,9 @@ def load(app):
             }), 503
         except Exception as e:
             return jsonify({"success": False, "message": str(e)}), 500
+        finally:
+            with _spawn_lock_mutex:
+                _spawn_in_progress.discard(_lock_key)
 
     # ── API: Status ───────────────────────────────────────────────────────────
     @plugin_bp.route("/api/whaley/status/<challenge_id>", methods=["GET"])
